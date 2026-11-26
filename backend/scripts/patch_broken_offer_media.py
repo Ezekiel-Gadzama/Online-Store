@@ -28,13 +28,13 @@ from scripts.fix_kateskate_offer_media import (  # noqa: E402
 )
 
 ROOT = Path(__file__).resolve().parents[2]
-MEDIA_ROOT = ROOT / "media" / "store_migration" / "kateskate" / "patches"
+MEDIA_ROOT = ROOT / "media" / "offer_assets" / "patches"
 VPS_HOST = os.environ.get("VPS_HOST", "144.172.100.41")
-VPS_REMOTE = "/opt/online-store/media/store_migration/kateskate/patches"
+VPS_REMOTE = "/opt/online-store/media/offer_assets/patches"
 UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 # Only these KateSkate-hosted assets are removed/replaced (not foreign partner URLs).
 KATESKATE_BAD_VIDEO_URLS = (
-    f"{PUBLIC_BASE}/api/media/files/store_migration/kateskate/spotify/spotify_nigeria.mp4",
+    f"{PUBLIC_BASE}/api/media/files/offer_assets/spotify/spotify_nigeria.mp4",
 )
 
 NEW_IMAGE_SOURCE: Dict[str, str] = {
@@ -137,7 +137,7 @@ def push_vps(local: Path) -> str:
     sftp.put(str(local), f"{VPS_REMOTE}/{local.name}")
     sftp.close()
     c.close()
-    return f"{PUBLIC_BASE}/api/media/files/store_migration/kateskate/patches/{local.name}"
+    return f"{PUBLIC_BASE}/api/media/files/offer_assets/patches/{local.name}"
 
 
 def patch_pictures_only(

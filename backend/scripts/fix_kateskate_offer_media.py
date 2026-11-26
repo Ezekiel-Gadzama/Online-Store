@@ -26,10 +26,10 @@ PUBLIC_BASE = os.environ.get("PUBLIC_URL", "http://144.172.100.41:8010").rstrip(
 
 SPOTIFY_OFFER = "MRKT-1G29S2OR"
 SPOTIFY_PICTURES = [
-    f"{PUBLIC_BASE}/api/media/files/store_migration/kateskate/spotify/spotify_lifestyle_listen.jpg",
-    f"{PUBLIC_BASE}/api/media/files/store_migration/kateskate/spotify/spotify_listening_header.jpg",
-    f"{PUBLIC_BASE}/api/media/files/store_migration/kateskate/spotify/spotify_nigeria_mood.png",
-    f"{PUBLIC_BASE}/api/media/files/store_migration/kateskate/spotify/spotify_mobile_player.jpg",
+    f"{PUBLIC_BASE}/api/media/files/offer_assets/spotify/spotify_lifestyle_listen.jpg",
+    f"{PUBLIC_BASE}/api/media/files/offer_assets/spotify/spotify_listening_header.jpg",
+    f"{PUBLIC_BASE}/api/media/files/offer_assets/spotify/spotify_nigeria_mood.png",
+    f"{PUBLIC_BASE}/api/media/files/offer_assets/spotify/spotify_mobile_player.jpg",
 ]
 
 

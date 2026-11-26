@@ -38,6 +38,8 @@ python scripts/store_setup.py refresh-catalog digital --store-id <id>
 
 After changing `catalog.json`, commit it.
 
+Default catalog lives only under `backend/data/store_templates/digital/`. Do not keep legacy bundles under `media/store_migration/` (old cross-store copies).
+
 ## For AI agents
 
 When the user asks to save products as the default for a store type:
