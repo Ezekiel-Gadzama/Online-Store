@@ -1,0 +1,6 @@
+{
+  "template_id": "digital",
+  "display_name": "Digital products (DBS)",
+  "store_types": ["digital"],
+  "catalog_bundle": "catalog.json"
+}

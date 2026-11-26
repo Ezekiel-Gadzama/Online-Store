@@ -4,6 +4,8 @@ export interface ChatMessage {
   id: string
   text: string
   author: 'SELLER' | 'CUSTOMER' | 'SYSTEM'
+  /** Staff member who sent this message from the admin app (Yandex only shows PARTNER). */
+  sender_name?: string | null
   created_at?: string
   order_id?: string
   attachments?: {
@@ -11,6 +13,13 @@ export interface ChatMessage {
     type: 'image' | 'video' | 'file'
     name: string
   }[]
+}
+
+export function chatMessageSenderLabel(message: ChatMessage): string {
+  if (message.author === 'CUSTOMER') return 'Customer'
+  if (message.author === 'SYSTEM') return 'System'
+  const name = message.sender_name?.trim()
+  return name || 'Staff'
 }
 
 export interface ChatListItem {
@@ -69,5 +78,19 @@ export const chatApi = {
   sendChatMessage: async (chatId: number, text: string) => {
     const response = await apiClient.post(`chat/chats/${chatId}/messages`, { text })
     return response.data
+  },
+
+  orderMeta: async (orderIds: string[]) => {
+    const response = await apiClient.post<{
+      orders: Record<string, { has_chat: boolean; unread_count: number }>
+    }>('chat/orders/meta', { order_ids: orderIds })
+    return response.data
+  },
+
+  marketplaceOrderUrl: async (orderId: string, marketplace?: string) => {
+    const response = await apiClient.get<{ url: string }>(`chat/orders/${orderId}/marketplace-url`, {
+      params: marketplace ? { marketplace } : undefined,
+    })
+    return response.data.url
   },
 }

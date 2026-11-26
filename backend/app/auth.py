@@ -143,29 +143,32 @@ async def get_current_active_user(
 
 
 # Permission checking functions
-def has_permission(user: models.User, permission: str) -> bool:
-    """Check if user has a specific permission"""
-    # Admin has all permissions
+def has_permission(user: models.User, permission: str, store_id: Optional[int] = None) -> bool:
+    """Check if user has a specific permission (optional per-store override via store_permissions)."""
+    from app.staff_permissions import effective_permissions_dict
+
     if user.is_admin:
         return True
-    
-    # Check user's permissions dict
-    if not user.permissions:
+
+    perms = effective_permissions_dict(user, store_id)
+    if not perms:
         return False
-    
-    # Default value for view_product_prices is True
+
     if permission == "view_product_prices":
-        return user.permissions.get(permission, True)
-    
-    return user.permissions.get(permission, False)
+        return bool(perms.get(permission, True))
+
+    return bool(perms.get(permission, False))
 
 
 def require_permission(permission: str):
     """Dependency to require a specific permission"""
+    from app.store_context import parse_store_header
+
     async def permission_checker(
-        current_user: models.User = Depends(get_current_active_user)
+        current_user: models.User = Depends(get_current_active_user),
+        store_id: Optional[int] = Depends(parse_store_header),
     ) -> models.User:
-        if not has_permission(current_user, permission):
+        if not has_permission(current_user, permission, store_id):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"Permission required: {permission}"

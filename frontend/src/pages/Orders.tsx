@@ -1,22 +1,32 @@
-import React, { useState, useEffect, useRef } from 'react'
+import React, { useState, useEffect, useRef, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useSearchParams } from 'react-router-dom'
 import { ordersApi } from '../api/orders'
 import { productsApi } from '../api/products'
 import { documentationsApi } from '../api/documentations'
-import { chatApi, ChatMessage } from '../api/chat'
+import { chatApi, ChatMessage, chatMessageSenderLabel } from '../api/chat'
 import { activationTemplatesApi } from '../api/activationTemplates'
 import { clientsApi } from '../api/clients'
 import { mediaApi } from '../api/media'
-import { CheckCircle, Mail, RefreshCw, Search, FileText, MessageCircle, X, Send, AlertCircle, ChevronDown, ChevronRight, UserPlus, Paperclip, CheckCheck } from 'lucide-react'
+import { CheckCircle, Mail, RefreshCw, Search, FileText, MessageCircle, X, Send, AlertCircle, ChevronDown, ChevronRight, UserPlus, Paperclip, CheckCheck, ExternalLink } from 'lucide-react'
 import { useTimeZone } from '../contexts/TimeZoneContext'
 import CopyButton from '../components/CopyButton'
 import FeedbackButton from '../components/FeedbackButton'
 import ConfirmationModal from '../components/ConfirmationModal'
+import OrderIdWithChat from '../components/orders/OrderIdWithChat'
+import OrderAcceptCell from '../components/orders/OrderAcceptCell'
+import { useStore } from '../contexts/StoreContext'
+import { useAuth } from '../contexts/AuthContext'
+import { assigneeDisplayName } from '../utils/userDisplay'
 
 export default function Orders() {
   const { formatDateTime } = useTimeZone()
+  const { currentStore } = useStore()
+  const { user: currentUser } = useAuth()
   const [activeTab, setActiveTab] = useState<'digital' | 'physical'>('digital')
   const [statusFilter, setStatusFilter] = useState<string>('')
+  const [assignedFilter, setAssignedFilter] = useState<string>('')
+  const [searchParams, setSearchParams] = useSearchParams()
   const [searchTerm, setSearchTerm] = useState('')
   const [startDate, setStartDate] = useState<string>('')
   const [endDate, setEndDate] = useState<string>('')
@@ -62,7 +72,7 @@ export default function Orders() {
   useEffect(() => {
     // Reset paging when filters change
     setPage(0)
-  }, [statusFilter, startDate, endDate])
+  }, [statusFilter, assignedFilter, startDate, endDate])
 
   const { data: pendingCounts } = useQuery({
     queryKey: ['orders', 'pending-counts'],
@@ -71,24 +81,36 @@ export default function Orders() {
     refetchInterval: 30_000,
   })
 
+  const { data: statusCounts } = useQuery({
+    queryKey: ['orders', 'status-counts', activeTab, startDate, endDate],
+    queryFn: () =>
+      ordersApi.getStatusCounts({
+        is_digital: activeTab === 'digital',
+        start_date: startDate || undefined,
+        end_date: endDate || undefined,
+      }),
+    staleTime: 15_000,
+    refetchInterval: 30_000,
+  })
+
   const { data: orders, isLoading, refetch } = useQuery({
-    queryKey: ['orders', activeTab, page, pageSize, statusFilter, startDate, endDate],
+    queryKey: ['orders', activeTab, page, pageSize, statusFilter, assignedFilter, startDate, endDate],
     queryFn: () => {
-      // Cast to avoid TS stale type mismatch in some environments
       const params = {
         is_digital: activeTab === 'digital',
         skip: page * pageSize,
         limit: pageSize,
         refresh_status: page === 0,
         status: statusFilter || undefined,
+        assigned_to: assignedFilter || undefined,
         start_date: startDate || undefined,
         end_date: endDate || undefined,
       } as any
       return ordersApi.getAll(params)
     },
-    staleTime: 0, // Always refetch on mount
-    gcTime: 0, // Don't cache (gcTime replaces cacheTime in React Query v5)
-    refetchInterval: 30000, // Refetch every 30 seconds to get latest data after sync
+    staleTime: 60_000, // 1 min: use cached data when navigating back to previous page
+    gcTime: 5 * 60 * 1000, // 5 min: keep cached pages so Previous doesn't refetch
+    refetchInterval: 30000, // Refetch every 30 seconds when tab is focused
   })
 
   // Fetch all activation templates to check random_key
@@ -151,7 +173,53 @@ export default function Orders() {
   const handleOpenOrderChat = (orderId: string) => {
     setSelectedOrderId(orderId)
     setShowOrderChat(true)
+    queryClient.invalidateQueries({ queryKey: ['order-chat-unread', orderId] })
   }
+
+  const orderForChat = useMemo(
+    () => (selectedOrderId ? orders?.find((o) => o.yandex_order_id === selectedOrderId) : undefined),
+    [orders, selectedOrderId],
+  )
+
+  const chatModalProductName = useMemo(() => {
+    if (!orderForChat) return undefined
+    if (orderForChat.items?.length) {
+      const names = orderForChat.items.map((i) => i.product_name).filter(Boolean)
+      if (names.length === 1) return names[0]
+      if (names.length > 1) return `${names[0]} (+${names.length - 1} more)`
+    }
+    return orderForChat.product_name || undefined
+  }, [orderForChat])
+
+  useEffect(() => {
+    const openChat = searchParams.get('openChat')
+    if (openChat) {
+      handleOpenOrderChat(openChat)
+      const next = new URLSearchParams(searchParams)
+      next.delete('openChat')
+      setSearchParams(next, { replace: true })
+    }
+  }, [searchParams])
+
+  const orderIdsOnPage = useMemo(
+    () => (orders ?? []).map((o) => o.yandex_order_id),
+    [orders],
+  )
+
+  const { data: chatMeta } = useQuery({
+    queryKey: ['orders-chat-meta', orderIdsOnPage.join(',')],
+    queryFn: () => chatApi.orderMeta(orderIdsOnPage),
+    enabled: orderIdsOnPage.length > 0,
+    refetchInterval: 20000,
+  })
+
+  const chatFlags = chatMeta?.orders ?? {}
+
+  const { data: assigneeOptions = [] } = useQuery({
+    queryKey: ['order-assignees', currentStore?.id, 'yandex'],
+    queryFn: () => ordersApi.getAssignees('yandex'),
+    enabled: currentStore?.id != null,
+  })
 
   const handleOpenStoreChat = () => {
     setShowStoreChat(true)
@@ -235,45 +303,42 @@ export default function Orders() {
         </nav>
       </div>
 
-      {/* Order Status Counts */}
-      {orders && (
-        <div className="mb-6 grid grid-cols-2 md:grid-cols-5 gap-4">
-          {(() => {
-            const counts = {
-              pending: orders.filter(o => o.status === 'pending').length,
-              processing: orders.filter(o => o.status === 'processing').length,
-              completed: orders.filter(o => o.status === 'completed').length,
-              cancelled: orders.filter(o => o.status === 'cancelled').length,
-              finished: orders.filter(o => o.status === 'finished').length,
-            }
-            
-            return (
-              <>
-                <div className="bg-white p-4 rounded-lg shadow">
-                  <div className="text-sm text-gray-500">Pending</div>
-                  <div className="text-2xl font-bold text-yellow-600">{counts.pending}</div>
-                </div>
-                <div className="bg-white p-4 rounded-lg shadow">
-                  <div className="text-sm text-gray-500">Processing</div>
-                  <div className="text-2xl font-bold text-blue-600">{counts.processing}</div>
-                </div>
-                <div className="bg-white p-4 rounded-lg shadow">
-                  <div className="text-sm text-gray-500">Completed</div>
-                  <div className="text-2xl font-bold text-green-600">{counts.completed}</div>
-                </div>
-                <div className="bg-white p-4 rounded-lg shadow">
-                  <div className="text-sm text-gray-500">Cancelled</div>
-                  <div className="text-2xl font-bold text-red-600">{counts.cancelled}</div>
-                </div>
-                <div className="bg-white p-4 rounded-lg shadow">
-                  <div className="text-sm text-gray-500">Finished</div>
-                  <div className="text-2xl font-bold text-purple-600">{counts.finished}</div>
-                </div>
-              </>
-            )
-          })()}
-        </div>
-      )}
+      {/* Order Status Counts - total across all pages */}
+      <div className="mb-6 grid grid-cols-2 md:grid-cols-5 gap-4">
+        {(() => {
+          const counts = statusCounts ?? {
+            pending: 0,
+            processing: 0,
+            completed: 0,
+            cancelled: 0,
+            finished: 0,
+          }
+          return (
+            <>
+              <div className="bg-white p-4 rounded-lg shadow">
+                <div className="text-sm text-gray-500">Pending</div>
+                <div className="text-2xl font-bold text-yellow-600">{counts.pending}</div>
+              </div>
+              <div className="bg-white p-4 rounded-lg shadow">
+                <div className="text-sm text-gray-500">Processing</div>
+                <div className="text-2xl font-bold text-blue-600">{counts.processing}</div>
+              </div>
+              <div className="bg-white p-4 rounded-lg shadow">
+                <div className="text-sm text-gray-500">Completed</div>
+                <div className="text-2xl font-bold text-green-600">{counts.completed}</div>
+              </div>
+              <div className="bg-white p-4 rounded-lg shadow">
+                <div className="text-sm text-gray-500">Cancelled</div>
+                <div className="text-2xl font-bold text-red-600">{counts.cancelled}</div>
+              </div>
+              <div className="bg-white p-4 rounded-lg shadow">
+                <div className="text-sm text-gray-500">Finished</div>
+                <div className="text-2xl font-bold text-purple-600">{counts.finished}</div>
+              </div>
+            </>
+          )
+        })()}
+      </div>
 
       {/* Filters */}
       <div className="mb-4 space-y-4">
@@ -300,6 +365,22 @@ export default function Orders() {
             <option value="completed">Completed</option>
             <option value="finished">Finished</option>
             <option value="cancelled">Cancelled</option>
+          </select>
+          <select
+            value={assignedFilter}
+            onChange={(e) => setAssignedFilter(e.target.value)}
+            className="px-4 py-2 border border-gray-300 rounded-md"
+          >
+            <option value="">All assignments</option>
+            <option value="unassigned">Unassigned</option>
+            <option value="me">Assigned to me</option>
+            {assigneeOptions
+              .filter((u) => u.id !== currentUser?.id)
+              .map((u) => (
+              <option key={u.id} value={String(u.id)}>
+                {assigneeDisplayName(u)}
+              </option>
+            ))}
           </select>
         </div>
         <div className="flex flex-col sm:flex-row gap-4">
@@ -363,6 +444,9 @@ export default function Orders() {
                 Product
               </th>
               <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                Accepted
+              </th>
+              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                 Customer
               </th>
               <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
@@ -395,7 +479,7 @@ export default function Orders() {
           <tbody className="bg-white divide-y divide-gray-200">
             {isLoading ? (
               <tr>
-                <td colSpan={activeTab === 'digital' ? 10 : 8} className="px-6 py-4 text-center">Loading...</td>
+                <td colSpan={activeTab === 'digital' ? 11 : 9} className="px-6 py-4 text-center">Loading...</td>
               </tr>
             ) : filteredOrders && filteredOrders.length > 0 ? (
               filteredOrders.map((order) => {
@@ -455,13 +539,25 @@ export default function Orders() {
                               <ChevronRight className="h-4 w-4" />
                             )}
                           </button>
-                          {order.yandex_order_id}
+                          <OrderIdWithChat
+                            orderId={order.yandex_order_id}
+                            hasChat={chatFlags[order.yandex_order_id]?.has_chat}
+                            onOpenChat={handleOpenOrderChat}
+                          />
                         </div>
                       </td>
                       <td className="px-6 py-4 text-sm text-gray-900 max-w-xs">
                         <div className="font-medium">
                           {order.items_count || orderItems.length} product{(order.items_count || orderItems.length) !== 1 ? 's' : ''}
                         </div>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <OrderAcceptCell
+                          yandexOrderId={order.yandex_order_id}
+                          marketplace={order.marketplace}
+                          assignedToUserId={order.assigned_to_user_id}
+                          assignedToName={order.assigned_to_name}
+                        />
                       </td>
                   <td className="px-6 py-4 whitespace-nowrap">
                     <div className="text-sm text-gray-900">{order.customer_name || 'N/A'}</div>
@@ -679,7 +775,7 @@ export default function Orders() {
               })
             ) : (
               <tr>
-                <td colSpan={activeTab === 'digital' ? 10 : 8} className="px-6 py-4 text-center text-gray-500">
+                <td colSpan={activeTab === 'digital' ? 11 : 9} className="px-6 py-4 text-center text-gray-500">
                   No orders found
                 </td>
               </tr>
@@ -693,6 +789,9 @@ export default function Orders() {
       {showOrderChat && selectedOrderId && (
         <OrderChatModal
           orderId={selectedOrderId}
+          marketplace={orderForChat?.marketplace ?? 'yandex'}
+          productName={chatModalProductName}
+          customerName={orderForChat?.customer_name}
           onClose={() => {
             setShowOrderChat(false)
             setSelectedOrderId(null)
@@ -747,16 +846,18 @@ export default function Orders() {
         confirmText="Mark as Finished"
         cancelText="Cancel"
         variant="info"
-        onConfirm={() => {
-          if (markFinishedConfirm.orderId) {
-            ordersApi.markFinished(markFinishedConfirm.orderId).then(() => {
-              queryClient.invalidateQueries({ queryKey: ['orders'] })
-              showNotification('success', 'Order marked as finished!')
-            }).catch((error: any) => {
-              showNotification('error', error?.response?.data?.detail || 'Failed to mark order as finished')
-            })
-          }
+        onConfirm={async () => {
+          const orderId = markFinishedConfirm.orderId
           setMarkFinishedConfirm({ isOpen: false, orderId: null })
+          if (!orderId) return
+          try {
+            await ordersApi.markFinished(orderId)
+            await queryClient.invalidateQueries({ queryKey: ['orders'] })
+            await refetch()
+            showNotification('success', 'Order marked as finished!')
+          } catch (error: any) {
+            showNotification('error', error?.response?.data?.detail || 'Failed to mark order as finished')
+          }
         }}
         onCancel={() => setMarkFinishedConfirm({ isOpen: false, orderId: null })}
       />
@@ -860,7 +961,19 @@ function OrderChatButton({ orderId, onOpenChat }: { orderId: string; onOpenChat:
 }
 
 // Order Chat Modal Component
-function OrderChatModal({ orderId, onClose }: { orderId: string; onClose: () => void }) {
+function OrderChatModal({
+  orderId,
+  marketplace,
+  productName,
+  customerName,
+  onClose,
+}: {
+  orderId: string
+  marketplace?: string
+  productName?: string
+  customerName?: string | null
+  onClose: () => void
+}) {
   const { formatDateTime } = useTimeZone()
   const [messageText, setMessageText] = useState('')
   const [isUploading, setIsUploading] = useState(false)
@@ -879,6 +992,12 @@ function OrderChatModal({ orderId, onClose }: { orderId: string; onClose: () => 
     queryFn: () => chatApi.getOrderMessages(orderId),
     refetchInterval: 5000, // Refresh every 5 seconds
     placeholderData: (prev) => prev,
+  })
+
+  const { data: marketplaceUrl } = useQuery({
+    queryKey: ['order-marketplace-url', orderId, marketplace],
+    queryFn: () => chatApi.marketplaceOrderUrl(orderId, marketplace),
+    retry: false,
   })
 
   // Copy UI handled by shared CopyButton component
@@ -970,6 +1089,7 @@ function OrderChatModal({ orderId, onClose }: { orderId: string; onClose: () => 
     } finally {
       setMarkingRead(false)
       queryClient.refetchQueries({ queryKey: ['order-chat-unread', orderId] })
+      queryClient.invalidateQueries({ queryKey: ['orders-chat-meta'] })
     }
   }
 
@@ -1039,9 +1159,31 @@ function OrderChatModal({ orderId, onClose }: { orderId: string; onClose: () => 
   return (
     <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
       <div className="relative top-10 mx-auto p-5 border w-full max-w-2xl shadow-lg rounded-md bg-white max-h-[90vh] flex flex-col">
-        <div className="flex justify-between items-center mb-4 gap-3">
-          <h3 className="text-xl font-bold text-gray-900">Order Chat - {orderId}</h3>
+        <div className="flex justify-between items-start mb-4 gap-3">
+          <div className="min-w-0">
+            <h3 className="text-lg font-bold text-gray-900">Order #{orderId}</h3>
+            {productName ? (
+              <p className="text-sm font-medium text-gray-800 mt-0.5 truncate" title={productName}>
+                {productName}
+              </p>
+            ) : null}
+            {customerName ? (
+              <p className="text-xs text-gray-500 mt-1">Customer: {customerName}</p>
+            ) : null}
+          </div>
           <div className="flex items-center gap-2">
+            {marketplaceUrl && (
+              <a
+                href={marketplaceUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1 rounded-md border border-gray-300 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
+                title="Open chat on marketplace site"
+              >
+                <ExternalLink className="h-4 w-4" />
+                Marketplace chat
+              </a>
+            )}
             <FeedbackButton
               onAction={markOrderChatAsRead}
               disabled={markingRead}
@@ -1123,7 +1265,7 @@ function OrderChatModal({ orderId, onClose }: { orderId: string; onClose: () => 
                   }`}
                 >
                   <div className="text-xs mb-1 opacity-75">
-                    {message.author === 'SELLER' ? 'You' : message.author === 'CUSTOMER' ? 'Customer' : 'System'}
+                    {chatMessageSenderLabel(message)}
                   </div>
                   {body && (
                     <div className="text-sm break-words whitespace-pre-wrap">{body}</div>

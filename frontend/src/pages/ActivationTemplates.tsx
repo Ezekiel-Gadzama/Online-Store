@@ -58,6 +58,8 @@ export default function ActivationTemplates() {
   const { data: templates, isLoading } = useQuery({
     queryKey: ['email-templates', searchTerm, page, pageSize],
     queryFn: () => activationTemplatesApi.getAll(searchTerm || undefined, { skip: page * pageSize, limit: pageSize }),
+    staleTime: 60_000,
+    gcTime: 5 * 60 * 1000,
   })
 
   useEffect(() => {
@@ -546,7 +548,7 @@ function TemplateModal({
               </p>
             </div>
             <div className="space-y-2">
-              <label className="flex items-center">
+              <div className="flex items-center">
                 <input
                   type="checkbox"
                   checked={randomKey}
@@ -554,13 +556,13 @@ function TemplateModal({
                   className="mr-2"
                 />
                 <span className="text-sm text-gray-700">Random Key (Auto-generated activation code)</span>
-              </label>
+              </div>
               <p className="text-xs text-gray-500 ml-6">
                 If checked, activation codes will be automatically generated. If unchecked, you'll need to provide codes manually.
               </p>
             </div>
             <div className="space-y-2">
-              <label className="flex items-center">
+              <div className="flex items-center">
                 <input
                   type="checkbox"
                   checked={requiredLogin}
@@ -568,7 +570,7 @@ function TemplateModal({
                   className="mr-2"
                 />
                 <span className="text-sm text-gray-700">Required Login</span>
-              </label>
+              </div>
               <p className="text-xs text-gray-500 ml-6">
                 If checked, adds "Done! The operator will log in to your account..." text after the template body.
               </p>

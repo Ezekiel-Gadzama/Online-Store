@@ -1,12 +1,13 @@
-# Setup Guide
+# Setup Guide — Online Store
+
+Multi-store setup: create an owner account, then add stores and marketplace connections (Yandex first). See [README.md](README.md) and [STORE_SETUP.md](STORE_SETUP.md).
 
 ## Quick Start
 
 ### Prerequisites
 
-- Python 3.8+ installed
-- Node.js 16+ and npm installed
-- Yandex Market Partner account with API access
+- Python 3.8+ and Node.js 16+
+- Marketplace partner account with API access (Yandex Market for the current integration)
 
 ### Step 1: Backend Setup
 

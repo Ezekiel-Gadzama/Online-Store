@@ -1,4 +1,4 @@
-# 🚀 Apply All Yandex Market Fixes - Quick Start
+# Apply Online Store fixes — quick start
 
 ## ⚡ Quick Fix (2 Minutes)
 

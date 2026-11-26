@@ -20,6 +20,14 @@ import { useState, useEffect, useRef } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useAuth } from '../contexts/AuthContext'
 import NotificationIcon from './NotificationIcon'
+import StoreSwitcher from './StoreSwitcher'
+import StoreViewControls from './StoreViewControls'
+import { useStore } from '../contexts/StoreContext'
+import { marketplaceConnectionsApi } from '../api/marketplaceConnections'
+import { loadStoreViewPrefs } from '../utils/storeSelection'
+import { marketplaceHeaderLine } from '../utils/marketplaceHeaderLine'
+import { userDisplayName } from '../utils/userDisplay'
+import UserTimezoneModal from './UserTimezoneModal'
 import { chatApi } from '../api/chat'
 
 interface LayoutProps {
@@ -38,6 +46,7 @@ export default function Layout({ children }: LayoutProps) {
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const { user, logout } = useAuth()
   const [userMenuOpen, setUserMenuOpen] = useState(false)
+  const [timezoneOpen, setTimezoneOpen] = useState(false)
   const userMenuRef = useRef<HTMLDivElement>(null)
   
   // Close user menu when clicking outside
@@ -85,6 +94,38 @@ export default function Layout({ children }: LayoutProps) {
     refetchInterval: 30_000,
   })
 
+  const businessDisplayName = user?.business_name?.trim() || ''
+  const accountDisplayName = userDisplayName(user)
+  const { currentStore } = useStore()
+  const storeId = currentStore?.id
+
+  const { data: marketplaceConnections = [] } = useQuery({
+    queryKey: ['marketplace-connections', storeId, 'header'],
+    queryFn: () => marketplaceConnectionsApi.list(),
+    enabled: storeId != null,
+    staleTime: 30_000,
+  })
+
+  const [marketplaceSubtitle, setMarketplaceSubtitle] = useState('')
+
+  useEffect(() => {
+    if (storeId == null) {
+      setMarketplaceSubtitle('')
+      return
+    }
+    const sync = () => {
+      const prefs = loadStoreViewPrefs(storeId, user?.store_ui_preferences ?? null)
+      setMarketplaceSubtitle(marketplaceHeaderLine(marketplaceConnections, prefs.selected_marketplaces))
+    }
+    sync()
+    const onPrefs = (ev: Event) => {
+      const d = (ev as CustomEvent<{ storeId: number }>).detail
+      if (d?.storeId === storeId) sync()
+    }
+    window.addEventListener('store-view-prefs-changed', onPrefs)
+    return () => window.removeEventListener('store-view-prefs-changed', onPrefs)
+  }, [storeId, user?.store_ui_preferences, marketplaceConnections])
+
   const hasUnreadChats = (() => {
     const chats = chatsNavData?.chats ?? []
     for (const c of chats) {
@@ -110,7 +151,7 @@ export default function Layout({ children }: LayoutProps) {
         <div className="fixed inset-0 bg-gray-600 bg-opacity-75" onClick={() => setSidebarOpen(false)} />
         <div className="fixed inset-y-0 left-0 flex w-64 flex-col bg-white">
           <div className="flex h-16 items-center justify-between px-4 border-b">
-            <h1 className="text-xl font-bold text-gray-900">{user?.business_name || 'Yandex Market'}</h1>
+            <StoreSwitcher />
             <button onClick={() => setSidebarOpen(false)} className="text-gray-500">
               <X className="h-6 w-6" />
             </button>
@@ -141,7 +182,7 @@ export default function Layout({ children }: LayoutProps) {
             })}
           </nav>
           <div className="border-t px-4 py-4">
-            <div className="text-sm text-gray-700 mb-2">{user?.email}</div>
+            <div className="text-sm text-gray-700 mb-2">{accountDisplayName}</div>
             {user?.is_admin && (
               <div className="text-xs text-blue-600 mb-2">Admin</div>
             )}
@@ -173,7 +214,7 @@ export default function Layout({ children }: LayoutProps) {
       <div className="hidden lg:fixed lg:inset-y-0 lg:flex lg:w-64 lg:flex-col">
         <div className="flex flex-col flex-grow bg-white border-r border-gray-200">
           <div className="flex h-16 items-center px-4 border-b">
-            <h1 className="text-xl font-bold text-gray-900">{user?.business_name || 'Yandex Market'}</h1>
+            <StoreSwitcher />
           </div>
           <nav className="flex-1 space-y-1 px-2 py-4">
             {navigation.map((item) => {
@@ -212,29 +253,75 @@ export default function Layout({ children }: LayoutProps) {
           >
             <Menu className="h-6 w-6" />
           </button>
-          <div className="flex items-center justify-between flex-1 px-4">
-            <h1 className="text-lg font-semibold text-gray-900">{user?.business_name || 'Yandex Market'}</h1>
-            <div className="text-sm text-gray-700">{user?.email}</div>
+          <div className="flex items-center flex-1 gap-2 px-2 min-w-0 relative">
+            <StoreSwitcher />
+            <StoreViewControls />
+            <div className="flex-1 text-center px-2 min-w-0 pointer-events-none">
+              <div
+                className="text-[10px] font-medium uppercase tracking-wider text-gray-400 leading-tight truncate"
+                title={marketplaceSubtitle || undefined}
+              >
+                {marketplaceSubtitle || '…'}
+              </div>
+              <div
+                className="text-base font-bold text-gray-900 truncate leading-tight"
+                title={businessDisplayName || undefined}
+              >
+                {businessDisplayName || '…'}
+              </div>
+            </div>
+            <div className="text-xs text-gray-700 truncate max-w-[120px] shrink-0" title={user?.email}>
+              {accountDisplayName}
+            </div>
           </div>
         </div>
         
         {/* Desktop header */}
         <div className="hidden lg:block sticky top-0 z-10 h-16 bg-white border-b border-gray-200">
-          <div className="flex items-center justify-end gap-4 h-full px-6">
-            <NotificationIcon />
-            <div className="relative" ref={userMenuRef}>
+          <div className="relative flex items-center gap-4 h-full px-6">
+            <StoreViewControls />
+            <div className="pointer-events-none absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 text-center max-w-lg w-full px-32">
+              <p
+                className="text-xs font-medium uppercase tracking-wider text-gray-400 truncate"
+                title={marketplaceSubtitle || undefined}
+              >
+                {marketplaceSubtitle || '…'}
+              </p>
+              <p
+                className="text-2xl font-bold text-gray-900 truncate"
+                title={businessDisplayName || undefined}
+              >
+                {businessDisplayName || '…'}
+              </p>
+            </div>
+            <div className="ml-auto flex items-center gap-4 z-10">
+              <NotificationIcon />
+              <div className="relative" ref={userMenuRef}>
               <button
                 onClick={() => setUserMenuOpen(!userMenuOpen)}
                 className="flex items-center space-x-2 text-sm text-gray-700 hover:text-gray-900 px-3 py-2 rounded-md hover:bg-gray-50"
               >
-                <span>{user?.email}</span>
+                <span title={user?.email}>{accountDisplayName}</span>
                 {user?.is_admin && (
+                  <span className="text-xs text-blue-600">(Owner)</span>
+                )}
+                {!user?.is_admin && user?.is_business_admin && (
                   <span className="text-xs text-blue-600">(Admin)</span>
                 )}
                 <UserCog className="h-5 w-5" />
               </button>
               {userMenuOpen && (
                 <div className="absolute right-0 mt-2 w-48 bg-white rounded-md shadow-lg py-1 z-50 border border-gray-200">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setTimezoneOpen(true)
+                      setUserMenuOpen(false)
+                    }}
+                    className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
+                  >
+                    Profile
+                  </button>
                   {!user?.is_admin && (
                     <Link
                       to="/reset-password"
@@ -257,6 +344,7 @@ export default function Layout({ children }: LayoutProps) {
                   </button>
                 </div>
               )}
+              </div>
             </div>
           </div>
         </div>
@@ -267,6 +355,7 @@ export default function Layout({ children }: LayoutProps) {
           </div>
         </main>
       </div>
+      <UserTimezoneModal open={timezoneOpen} onClose={() => setTimezoneOpen(false)} />
     </div>
   )
 }

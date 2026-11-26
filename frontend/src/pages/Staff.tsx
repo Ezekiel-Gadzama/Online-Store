@@ -5,6 +5,32 @@ import { User, UserPermissions } from '../api/auth'
 import { useAuth } from '../contexts/AuthContext'
 import { UserPlus, Edit2, Trash2, X, Mail, CheckCircle, AlertCircle, Eye, EyeOff } from 'lucide-react'
 import ConfirmationModal from '../components/ConfirmationModal'
+import StaffStoreAccessFields from '../components/StaffStoreAccessFields'
+import type { StoreMarketAccess } from '../utils/staffStoreAccess'
+import { useStore } from '../contexts/StoreContext'
+import { permissionsForStore, PERM_KEYS } from '../utils/staffPermissions'
+import type { OwnerRestrictions } from '../api/auth'
+import {
+  canManageStaffRights,
+  canViewStaff,
+  emptyOwnerRestrictions,
+  isOwner,
+  permissionsForEditForm,
+  showPasswordEditor,
+  showStoreAccessEditor,
+  actorCanGrantPermission,
+} from '../utils/staffRoles'
+
+const PERM_LABELS: Record<(typeof PERM_KEYS)[number], string> = {
+  view_staff: 'View Staff',
+  view_settings: 'View Settings',
+  client_right: 'Client Rights (Delete, Edit, Add, Subtract)',
+  view_marketing_emails: 'View Marketing Emails',
+  dashboard_right: 'Dashboard Analytics (Revenue, Profit, Charts)',
+  view_product_prices: 'View Product Prices',
+  create_store: 'Create stores',
+  delete_store: 'Delete stores (email OTP)',
+}
 
 export default function Staff() {
   const { user: currentUser, refreshUser, logout } = useAuth()
@@ -25,9 +51,18 @@ export default function Staff() {
   const [businessEmail, setBusinessEmail] = useState('')
   const [businessNewPassword, setBusinessNewPassword] = useState('')
   const [businessConfirmPassword, setBusinessConfirmPassword] = useState('')
+  const [businessOwnerName, setBusinessOwnerName] = useState('')
   const [businessName, setBusinessName] = useState('')
   const [businessUsername, setBusinessUsername] = useState('')
   const [showBusinessPassword, setShowBusinessPassword] = useState(false)
+  const [storeAccess, setStoreAccess] = useState<StoreMarketAccess>({ all_stores: true, stores: {} })
+  const [applyPermissionsToAllStores, setApplyPermissionsToAllStores] = useState(false)
+  const [addIsBusinessAdmin, setAddIsBusinessAdmin] = useState(true)
+  const [addBusinessAdminAllStores, setAddBusinessAdminAllStores] = useState(false)
+  const [editOwnerRestrictions, setEditOwnerRestrictions] = useState<OwnerRestrictions>(emptyOwnerRestrictions())
+  const [editIsBusinessAdmin, setEditIsBusinessAdmin] = useState(false)
+  const [editBusinessAdminAllStores, setEditBusinessAdminAllStores] = useState(true)
+  const { currentStore } = useStore()
   const queryClient = useQueryClient()
 
   const showNotification = (type: 'success' | 'error', message: string) => {
@@ -49,6 +84,17 @@ export default function Staff() {
 
   const createMutation = useMutation({
     mutationFn: (data: StaffCreate) => staffApi.create(data),
+    onError: (error: unknown) => {
+      const ax = error as { response?: { data?: { detail?: unknown } }; message?: string }
+      const d = ax?.response?.data?.detail
+      const msg =
+        typeof d === 'string'
+          ? d
+          : Array.isArray(d)
+            ? d.map((x) => (typeof x === 'object' && x && 'msg' in x ? String((x as { msg: string }).msg) : '')).join(', ')
+            : ax?.message || 'Failed to create staff'
+      showNotification('error', msg)
+    },
     onSuccess: (data: StaffCreateResponse) => {
       queryClient.invalidateQueries({ queryKey: ['staff'] })
       setIsAddModalOpen(false)
@@ -65,7 +111,7 @@ export default function Staff() {
   })
 
   const updateMutation = useMutation({
-    mutationFn: ({ id, data }: { id: number; data: { permissions?: UserPermissions; is_active?: boolean; name?: string } }) =>
+    mutationFn: ({ id, data }: { id: number; data: Parameters<typeof staffApi.update>[1] }) =>
       staffApi.update(id, data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['staff'] })
@@ -75,6 +121,16 @@ export default function Staff() {
       setEditNewPassword('')
       setEditConfirmPassword('')
       setShowEditPassword(false)
+      showNotification('success', 'Saved')
+    },
+    onError: (error: unknown) => {
+      const ax = error as { response?: { data?: { detail?: unknown } }; message?: string }
+      const d = ax?.response?.data?.detail
+      const msg =
+        typeof d === 'string'
+          ? d
+          : ax?.message || 'Failed to update staff permissions'
+      showNotification('error', msg)
     },
   })
 
@@ -131,17 +187,56 @@ export default function Staff() {
       email,
       ...(name.trim() ? { name: name.trim() } : {}),
       ...(password && password.trim() ? { password } : {}),
+      is_business_admin: addIsBusinessAdmin,
+      business_admin_all_stores: addIsBusinessAdmin ? addBusinessAdminAllStores : false,
     })
   }
 
   const handleEdit = (staff: User) => {
     setSelectedStaff(staff)
+    const raw = staff.store_market_access
+    if (raw && typeof raw === 'object') {
+      setStoreAccess({
+        all_stores: !!raw.all_stores,
+        stores: raw.stores ?? {},
+      })
+    } else {
+      setStoreAccess({ all_stores: true, stores: {} })
+    }
     setEditName(staff.name || '')
     setEditNewPassword('')
     setEditConfirmPassword('')
     setShowEditPassword(false)
+    setApplyPermissionsToAllStores(false)
+    setEditOwnerRestrictions(
+      staff.owner_restrictions
+        ? {
+            permissions: { ...(staff.owner_restrictions.permissions || {}) },
+            store_market_access: !!staff.owner_restrictions.store_market_access,
+            password_change: !!staff.owner_restrictions.password_change,
+          }
+        : emptyOwnerRestrictions(),
+    )
+    setEditIsBusinessAdmin(!!staff.is_business_admin)
+    setEditBusinessAdminAllStores(staff.business_admin_all_stores !== false)
     setIsEditModalOpen(true)
   }
+
+  const editPermissions = selectedStaff
+    ? permissionsForEditForm(
+        applyPermissionsToAllStores || !currentStore?.id
+          ? selectedStaff
+          : {
+              ...selectedStaff,
+              permissions: permissionsForStore(selectedStaff, currentStore.id),
+            },
+      )
+    : null
+
+  const canEditRights =
+    !!currentUser && !!selectedStaff && canManageStaffRights(currentUser)
+  const permissionsReadOnly =
+    !!selectedStaff?.is_business_admin && !isOwner(currentUser)
 
   const handleUpdate = (e: React.FormEvent) => {
     e.preventDefault()
@@ -157,25 +252,46 @@ export default function Staff() {
     }
 
     const formData = new FormData(e.currentTarget as HTMLFormElement)
-    const permissions: UserPermissions = {
-      view_staff: formData.get('view_staff') === 'on',
-      view_settings: formData.get('view_settings') === 'on',
-      client_right: formData.get('client_right') === 'on',
-      view_marketing_emails: formData.get('view_marketing_emails') === 'on',
-      dashboard_right: formData.get('dashboard_right') === 'on',
-      view_product_prices: formData.get('view_product_prices') === 'on',
-    }
     const is_active = formData.get('is_active') === 'on'
 
-    updateMutation.mutate({
-      id: selectedStaff.id,
-      data: {
-        permissions,
-        is_active,
-        ...(editName.trim() !== (selectedStaff.name || '').trim() ? { name: editName.trim() } : {}),
-        ...(editNewPassword ? { new_password: editNewPassword } : {}),
-      },
-    })
+    const data: Parameters<typeof staffApi.update>[1] = {}
+    if (editName.trim() !== (selectedStaff.name || '').trim()) {
+      data.name = editName.trim()
+    }
+
+    if (canEditRights) {
+      if (!permissionsReadOnly) {
+        if (!applyPermissionsToAllStores && !currentStore?.id) {
+          showNotification('error', 'Select a store to set store-specific permissions, or enable apply to all stores.')
+          return
+        }
+        const permissions = {} as UserPermissions
+        for (const key of PERM_KEYS) {
+          permissions[key] = formData.get(key) === 'on'
+        }
+        data.permissions = permissions
+        data.apply_permissions_to_all_stores = applyPermissionsToAllStores
+        data.permissions_store_id = applyPermissionsToAllStores ? null : currentStore!.id
+      }
+      const editingSelf = currentUser?.id === selectedStaff.id
+      if (!editingSelf) {
+        data.is_active = is_active
+      }
+    }
+
+    if (currentUser && showStoreAccessEditor(currentUser, selectedStaff)) {
+      data.store_market_access = storeAccess
+    }
+    if (currentUser && showPasswordEditor(currentUser, selectedStaff) && editNewPassword) {
+      data.new_password = editNewPassword
+    }
+    if (isOwner(currentUser)) {
+      data.owner_restrictions = editOwnerRestrictions
+      data.is_business_admin = editIsBusinessAdmin
+      data.business_admin_all_stores = editBusinessAdminAllStores
+    }
+
+    updateMutation.mutate({ id: selectedStaff.id, data })
   }
 
   const handleDelete = (staffId: number) => {
@@ -191,6 +307,7 @@ export default function Staff() {
   useEffect(() => {
     if (businessAccount && isBusinessModalOpen) {
       setBusinessEmail(businessAccount.email)
+      setBusinessOwnerName(businessAccount.name?.trim() || '')
       setBusinessName(businessAccount.business_name || '')
       setBusinessUsername(businessAccount.business_username || '')
     }
@@ -224,6 +341,9 @@ export default function Staff() {
     if (businessAccount && businessEmail.trim() !== businessAccount.email) {
       data.new_email = businessEmail.trim()
     }
+    if (businessAccount && businessOwnerName.trim() !== (businessAccount.name || '').trim()) {
+      data.name = businessOwnerName.trim()
+    }
     if (businessNewPassword) data.new_password = businessNewPassword
     if (businessAccount && businessName.trim() !== (businessAccount.business_name || '').trim()) {
       data.business_name = businessName.trim() || ''
@@ -239,7 +359,8 @@ export default function Staff() {
   }
 
   // Check if current user can manage staff
-  const canManageStaff = currentUser?.is_admin || currentUser?.permissions.view_staff
+  const canManageStaff = canViewStaff(currentUser)
+  const canCreateStaff = canManageStaffRights(currentUser)
 
   if (!canManageStaff) {
     return (
@@ -255,20 +376,24 @@ export default function Staff() {
       <div className="flex flex-col gap-4 sm:flex-row sm:justify-between sm:items-center mb-6">
         <h1 className="text-xl sm:text-2xl font-bold text-gray-900">Staff Management</h1>
         <div className="flex flex-col sm:flex-row gap-2 w-full sm:w-auto">
-          <button
-            onClick={handleOpenBusinessModal}
-            className="flex items-center justify-center px-4 py-2 border border-gray-300 text-gray-700 rounded-md hover:bg-gray-50 w-full sm:w-auto"
-          >
-            <Edit2 className="mr-2 h-5 w-5" />
-            Edit Business Account
-          </button>
-          <button
-            onClick={() => setIsAddModalOpen(true)}
-            className="flex items-center justify-center px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 w-full sm:w-auto"
-          >
-            <UserPlus className="mr-2 h-5 w-5" />
-            Add Staff
-          </button>
+          {isOwner(currentUser) && (
+            <button
+              onClick={handleOpenBusinessModal}
+              className="flex items-center justify-center px-4 py-2 border border-gray-300 text-gray-700 rounded-md hover:bg-gray-50 w-full sm:w-auto"
+            >
+              <Edit2 className="mr-2 h-5 w-5" />
+              Edit Business Account
+            </button>
+          )}
+          {canCreateStaff && (
+            <button
+              onClick={() => setIsAddModalOpen(true)}
+              className="flex items-center justify-center px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 w-full sm:w-auto"
+            >
+              <UserPlus className="mr-2 h-5 w-5" />
+              Add Staff
+            </button>
+          )}
         </div>
       </div>
 
@@ -295,10 +420,17 @@ export default function Staff() {
                   </tr>
                 </thead>
                 <tbody className="bg-white divide-y divide-gray-200">
-                  {staff.map((member) => (
+                  {staff.map((member) => {
+                    const displayPerms = permissionsForEditForm(member)
+                    return (
                     <tr key={member.id}>
                       <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{member.email}</td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{member.name || '—'}</td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                        {member.name || '—'}
+                        {member.is_business_admin && (
+                          <span className="ml-2 text-xs text-blue-600 font-medium">Admin</span>
+                        )}
+                      </td>
                       <td className="px-6 py-4 whitespace-nowrap">
                         <span className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${member.is_active ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>
                           {member.is_active ? 'Active' : 'Inactive'}
@@ -306,12 +438,12 @@ export default function Staff() {
                       </td>
                       <td className="px-6 py-4 text-sm text-gray-500">
                         <div className="flex flex-wrap gap-1">
-                          {member.permissions.view_staff && <span className="px-2 py-1 bg-blue-100 text-blue-800 text-xs rounded">Staff</span>}
-                          {member.permissions.view_settings && <span className="px-2 py-1 bg-purple-100 text-purple-800 text-xs rounded">Settings</span>}
-                          {member.permissions.client_right && <span className="px-2 py-1 bg-green-100 text-green-800 text-xs rounded">Clients</span>}
-                          {member.permissions.view_marketing_emails && <span className="px-2 py-1 bg-yellow-100 text-yellow-800 text-xs rounded">Marketing</span>}
-                          {member.permissions.dashboard_right && <span className="px-2 py-1 bg-indigo-100 text-indigo-800 text-xs rounded">Dashboard</span>}
-                          {member.permissions.view_product_prices && <span className="px-2 py-1 bg-gray-100 text-gray-800 text-xs rounded">Prices</span>}
+                          {displayPerms.view_staff && <span className="px-2 py-1 bg-blue-100 text-blue-800 text-xs rounded">Staff</span>}
+                          {displayPerms.view_settings && <span className="px-2 py-1 bg-purple-100 text-purple-800 text-xs rounded">Settings</span>}
+                          {displayPerms.client_right && <span className="px-2 py-1 bg-green-100 text-green-800 text-xs rounded">Clients</span>}
+                          {displayPerms.view_marketing_emails && <span className="px-2 py-1 bg-yellow-100 text-yellow-800 text-xs rounded">Marketing</span>}
+                          {displayPerms.dashboard_right && <span className="px-2 py-1 bg-indigo-100 text-indigo-800 text-xs rounded">Dashboard</span>}
+                          {displayPerms.view_product_prices && <span className="px-2 py-1 bg-gray-100 text-gray-800 text-xs rounded">Prices</span>}
                         </div>
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{new Date(member.created_at).toLocaleDateString()}</td>
@@ -327,7 +459,7 @@ export default function Staff() {
                         </div>
                       </td>
                     </tr>
-                  ))}
+                  )})}
                 </tbody>
               </table>
             </div>
@@ -335,7 +467,9 @@ export default function Staff() {
 
           {/* Mobile: cards */}
           <div className="md:hidden space-y-4">
-            {staff.map((member) => (
+            {staff.map((member) => {
+              const displayPerms = permissionsForEditForm(member)
+              return (
               <div key={member.id} className="bg-white shadow rounded-lg p-4 border border-gray-100">
                 <div className="flex justify-between items-start gap-2 mb-3">
                   <div>
@@ -349,12 +483,12 @@ export default function Staff() {
                 <div className="mb-2">
                   <span className="text-xs font-medium text-gray-500 uppercase tracking-wider">Permissions</span>
                   <div className="flex flex-wrap gap-1 mt-1">
-                    {member.permissions.view_staff && <span className="px-2 py-0.5 bg-blue-100 text-blue-800 text-xs rounded">Staff</span>}
-                    {member.permissions.view_settings && <span className="px-2 py-0.5 bg-purple-100 text-purple-800 text-xs rounded">Settings</span>}
-                    {member.permissions.client_right && <span className="px-2 py-0.5 bg-green-100 text-green-800 text-xs rounded">Clients</span>}
-                    {member.permissions.view_marketing_emails && <span className="px-2 py-0.5 bg-yellow-100 text-yellow-800 text-xs rounded">Marketing</span>}
-                    {member.permissions.dashboard_right && <span className="px-2 py-0.5 bg-indigo-100 text-indigo-800 text-xs rounded">Dashboard</span>}
-                    {member.permissions.view_product_prices && <span className="px-2 py-0.5 bg-gray-100 text-gray-800 text-xs rounded">Prices</span>}
+                    {displayPerms.view_staff && <span className="px-2 py-0.5 bg-blue-100 text-blue-800 text-xs rounded">Staff</span>}
+                    {displayPerms.view_settings && <span className="px-2 py-0.5 bg-purple-100 text-purple-800 text-xs rounded">Settings</span>}
+                    {displayPerms.client_right && <span className="px-2 py-0.5 bg-green-100 text-green-800 text-xs rounded">Clients</span>}
+                    {displayPerms.view_marketing_emails && <span className="px-2 py-0.5 bg-yellow-100 text-yellow-800 text-xs rounded">Marketing</span>}
+                    {displayPerms.dashboard_right && <span className="px-2 py-0.5 bg-indigo-100 text-indigo-800 text-xs rounded">Dashboard</span>}
+                    {displayPerms.view_product_prices && <span className="px-2 py-0.5 bg-gray-100 text-gray-800 text-xs rounded">Prices</span>}
                   </div>
                 </div>
                 <div className="text-xs text-gray-500 mb-3">Created {new Date(member.created_at).toLocaleDateString()}</div>
@@ -368,7 +502,7 @@ export default function Staff() {
                   )}
                 </div>
               </div>
-            ))}
+            )})}
           </div>
         </>
       )}
@@ -418,6 +552,28 @@ export default function Staff() {
                   placeholder="staff@example.com"
                 />
               </div>
+              {isOwner(currentUser) && (
+                <div className="mb-4 space-y-2 border border-gray-100 rounded-md p-3 bg-gray-50">
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={addIsBusinessAdmin}
+                      onChange={(e) => setAddIsBusinessAdmin(e.target.checked)}
+                    />
+                    <span className="text-sm font-medium text-gray-900">Business admin</span>
+                  </div>
+                  {addIsBusinessAdmin && (
+                    <div className="flex items-center gap-2 ml-6">
+                      <input
+                        type="checkbox"
+                        checked={addBusinessAdminAllStores}
+                        onChange={(e) => setAddBusinessAdminAllStores(e.target.checked)}
+                      />
+                      <span className="text-sm text-gray-700">Admin for all stores</span>
+                    </div>
+                  )}
+                </div>
+              )}
               <div className="mb-4">
                 <label className="block text-sm font-medium text-gray-700 mb-1">
                   Initial Password <span className="text-gray-500 font-normal">(optional)</span>
@@ -441,9 +597,6 @@ export default function Staff() {
                     {showPassword ? <EyeOff className="h-5 w-5" /> : <Eye className="h-5 w-5" />}
                   </button>
                 </div>
-                <p className="mt-1 text-xs text-gray-500">
-                  If set, give this password to the staff. They can login or go to /reset-password to set their own password.
-                </p>
               </div>
               <div className="flex justify-end space-x-3">
                 <button
@@ -475,9 +628,10 @@ export default function Staff() {
       {isEditModalOpen && selectedStaff && (
         <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50 p-4">
           <div className="relative top-4 sm:top-20 mx-auto p-4 sm:p-5 border w-full max-w-md shadow-lg rounded-md bg-white max-h-[90vh] overflow-y-auto">
-            <div className="flex justify-between items-center mb-4">
-              <h3 className="text-lg font-medium text-gray-900">Edit Staff Permissions</h3>
+            <div className="flex justify-between items-start mb-3">
+              <h3 className="text-lg font-medium text-gray-900">Edit staff</h3>
               <button
+                type="button"
                 onClick={() => {
                   setIsEditModalOpen(false)
                   setSelectedStaff(null)
@@ -491,7 +645,10 @@ export default function Staff() {
                 <X className="h-6 w-6" />
               </button>
             </div>
-            <form onSubmit={handleUpdate}>
+            <form
+              key={selectedStaff ? `${selectedStaff.id}-${currentStore?.id ?? 'none'}` : 'edit'}
+              onSubmit={handleUpdate}
+            >
               <div className="mb-4">
                 <label className="block text-sm font-medium text-gray-700 mb-2">
                   Email: {selectedStaff.email}
@@ -510,78 +667,161 @@ export default function Staff() {
                 />
               </div>
 
-              <div className="mb-4">
-                <label className="flex items-center">
-                  <input
-                    type="checkbox"
-                    name="is_active"
-                    defaultChecked={selectedStaff.is_active}
-                    className="mr-2"
-                  />
-                  <span className="text-sm text-gray-700">Active</span>
-                </label>
-              </div>
+              {isOwner(currentUser) && (
+                <div className="mb-4 space-y-2 border border-gray-100 rounded-md p-3 bg-gray-50">
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={editIsBusinessAdmin}
+                      onChange={(e) => setEditIsBusinessAdmin(e.target.checked)}
+                    />
+                    <span className="text-sm font-medium text-gray-900">Business admin</span>
+                  </div>
+                  {editIsBusinessAdmin && (
+                    <div className="flex items-center gap-2 ml-6">
+                      <input
+                        type="checkbox"
+                        checked={editBusinessAdminAllStores}
+                        onChange={(e) => setEditBusinessAdminAllStores(e.target.checked)}
+                      />
+                      <span className="text-sm text-gray-700">Admin for all stores</span>
+                    </div>
+                  )}
+                </div>
+              )}
 
-              <div className="mb-4 space-y-2">
-                <h4 className="text-sm font-medium text-gray-700 mb-2">Permissions:</h4>
-                <label className="flex items-center">
-                  <input
-                    type="checkbox"
-                    name="view_staff"
-                    defaultChecked={selectedStaff.permissions.view_staff}
-                    className="mr-2"
-                  />
-                  <span className="text-sm text-gray-700">View Staff</span>
-                </label>
-                <label className="flex items-center">
-                  <input
-                    type="checkbox"
-                    name="view_settings"
-                    defaultChecked={selectedStaff.permissions.view_settings}
-                    className="mr-2"
-                  />
-                  <span className="text-sm text-gray-700">View Settings</span>
-                </label>
-                <label className="flex items-center">
-                  <input
-                    type="checkbox"
-                    name="client_right"
-                    defaultChecked={selectedStaff.permissions.client_right}
-                    className="mr-2"
-                  />
-                  <span className="text-sm text-gray-700">Client Rights (Delete, Edit, Add, Subtract)</span>
-                </label>
-                <label className="flex items-center">
-                  <input
-                    type="checkbox"
-                    name="view_marketing_emails"
-                    defaultChecked={selectedStaff.permissions.view_marketing_emails}
-                    className="mr-2"
-                  />
-                  <span className="text-sm text-gray-700">View Marketing Emails</span>
-                </label>
-                <label className="flex items-center">
-                  <input
-                    type="checkbox"
-                    name="dashboard_right"
-                    defaultChecked={selectedStaff.permissions.dashboard_right}
-                    className="mr-2"
-                  />
-                  <span className="text-sm text-gray-700">Dashboard Analytics (Revenue, Profit, Charts)</span>
-                </label>
-                <label className="flex items-center">
-                  <input
-                    type="checkbox"
-                    name="view_product_prices"
-                    defaultChecked={selectedStaff.permissions.view_product_prices}
-                    className="mr-2"
-                  />
-                  <span className="text-sm text-gray-700">View Product Prices</span>
-                </label>
-              </div>
-
-              {currentUser?.is_admin && (
+              {canEditRights && currentUser?.id !== selectedStaff.id && (
                 <div className="mb-4">
+                  <div className="flex items-center">
+                    <input
+                      type="checkbox"
+                      name="is_active"
+                      defaultChecked={selectedStaff.is_active}
+                      className="mr-2"
+                    />
+                    <span className="text-sm text-gray-700">Active</span>
+                  </div>
+                </div>
+              )}
+
+              {canEditRights && (
+                <div className="mb-4 space-y-2 border-t border-gray-200 pt-4">
+                  <h4 className="text-sm font-medium text-gray-900 mb-2">
+                    Feature permissions
+                    {currentStore && !applyPermissionsToAllStores ? (
+                      <span className="font-normal text-gray-600"> · {currentStore.name}</span>
+                    ) : applyPermissionsToAllStores ? (
+                      <span className="font-normal text-gray-600"> · all stores</span>
+                    ) : null}
+                  </h4>
+                  {permissionsReadOnly && (
+                    <p className="text-xs text-gray-500 mb-2">Business admin — all features unless owner-restricted.</p>
+                  )}
+                  {PERM_KEYS.map((key) => {
+                    const ownerLocked = !!editOwnerRestrictions.permissions?.[key]
+                    const checked = ownerLocked ? false : (editPermissions?.[key] ?? false)
+                    const grantStoreId = applyPermissionsToAllStores ? null : currentStore?.id ?? null
+                    const cannotGrant =
+                      !isOwner(currentUser) &&
+                      !actorCanGrantPermission(currentUser, key, grantStoreId)
+                    return (
+                      <div key={key} className="flex items-center justify-between gap-2">
+                        <div className="flex items-center flex-1">
+                          <input
+                            type="checkbox"
+                            name={key}
+                            defaultChecked={checked}
+                            disabled={permissionsReadOnly || ownerLocked || cannotGrant}
+                            className="mr-2"
+                          />
+                          <span className="text-sm text-gray-700">{PERM_LABELS[key]}</span>
+                        </div>
+                        {isOwner(currentUser) && (
+                          <button
+                            type="button"
+                            title={ownerLocked ? 'Owner restrict (on)' : 'Owner restrict'}
+                            className={`text-xs px-2 py-0.5 rounded border ${
+                              ownerLocked
+                                ? 'border-red-300 text-red-700 bg-red-50'
+                                : 'border-gray-300 text-gray-600 hover:bg-gray-50'
+                            }`}
+                            onClick={() =>
+                              setEditOwnerRestrictions((prev) => {
+                                const perms = { ...(prev.permissions || {}) }
+                                if (perms[key]) {
+                                  delete perms[key]
+                                } else {
+                                  perms[key] = true
+                                }
+                                return { ...prev, permissions: perms }
+                              })
+                            }
+                          >
+                            {ownerLocked ? 'Restricted' : 'Restrict'}
+                          </button>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+
+              {currentUser && selectedStaff && showStoreAccessEditor(currentUser, selectedStaff) && (
+                <>
+                  {isOwner(currentUser) && (
+                    <div className="mb-2 flex justify-end">
+                      <button
+                        type="button"
+                        className={`text-xs px-2 py-0.5 rounded border ${
+                          editOwnerRestrictions.store_market_access
+                            ? 'border-red-300 text-red-700 bg-red-50'
+                            : 'border-gray-300 text-gray-600'
+                        }`}
+                        onClick={() =>
+                          setEditOwnerRestrictions((prev) => ({
+                            ...prev,
+                            store_market_access: !prev.store_market_access,
+                          }))
+                        }
+                      >
+                        {editOwnerRestrictions.store_market_access
+                          ? 'Store access restricted'
+                          : 'Restrict store access'}
+                      </button>
+                    </div>
+                  )}
+                  <StaffStoreAccessFields
+                    value={storeAccess}
+                    onChange={setStoreAccess}
+                    actor={currentUser}
+                  />
+                </>
+              )}
+
+              {currentUser && selectedStaff && showPasswordEditor(currentUser, selectedStaff) && (
+                <div className="mb-4 border-t border-gray-200 pt-4">
+                  {isOwner(currentUser) && (
+                    <div className="mb-2 flex justify-end">
+                      <button
+                        type="button"
+                        className={`text-xs px-2 py-0.5 rounded border ${
+                          editOwnerRestrictions.password_change
+                            ? 'border-red-300 text-red-700 bg-red-50'
+                            : 'border-gray-300 text-gray-600'
+                        }`}
+                        onClick={() =>
+                          setEditOwnerRestrictions((prev) => ({
+                            ...prev,
+                            password_change: !prev.password_change,
+                          }))
+                        }
+                      >
+                        {editOwnerRestrictions.password_change
+                          ? 'Password changes restricted'
+                          : 'Restrict password changes'}
+                      </button>
+                    </div>
+                  )}
                   <label className="block text-sm font-medium text-gray-700 mb-1">
                     New Password <span className="text-gray-500 font-normal">(optional)</span>
                   </label>
@@ -616,27 +856,39 @@ export default function Staff() {
                 </div>
               )}
 
-              <div className="flex justify-end space-x-3">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setIsEditModalOpen(false)
-                    setSelectedStaff(null)
-                    setEditNewPassword('')
-                    setEditConfirmPassword('')
-                    setShowEditPassword(false)
-                  }}
-                  className="px-4 py-2 border border-gray-300 rounded-md text-gray-700 hover:bg-gray-50"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={updateMutation.isPending}
-                  className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50"
-                >
-                  {updateMutation.isPending ? 'Saving...' : 'Save'}
-                </button>
+              <div className="border-t border-gray-200 pt-4 mt-2 space-y-3">
+                {canEditRights && !permissionsReadOnly && (
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={applyPermissionsToAllStores}
+                      onChange={(e) => setApplyPermissionsToAllStores(e.target.checked)}
+                    />
+                    <span className="text-sm text-gray-800">Apply permission changes to all stores</span>
+                  </div>
+                )}
+                <div className="flex justify-end space-x-3">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsEditModalOpen(false)
+                      setSelectedStaff(null)
+                      setEditNewPassword('')
+                      setEditConfirmPassword('')
+                      setShowEditPassword(false)
+                    }}
+                    className="px-4 py-2 border border-gray-300 rounded-md text-gray-700 hover:bg-gray-50"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={updateMutation.isPending}
+                    className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50"
+                  >
+                    {updateMutation.isPending ? 'Saving...' : 'Save'}
+                  </button>
+                </div>
               </div>
             </form>
           </div>
@@ -668,6 +920,16 @@ export default function Staff() {
             ) : (
               <form onSubmit={handleBusinessUpdate}>
                 <div className="mb-4">
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Owner name</label>
+                  <input
+                    type="text"
+                    value={businessOwnerName}
+                    onChange={(e) => setBusinessOwnerName(e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    placeholder="Display name in header"
+                  />
+                </div>
+                <div className="mb-4">
                   <label className="block text-sm font-medium text-gray-700 mb-1">Business Email</label>
                   <input
                     type="email"
@@ -677,7 +939,6 @@ export default function Staff() {
                     className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
                     placeholder="admin@business.com"
                   />
-                  <p className="mt-1 text-xs text-gray-500">Change the business (admin) login email.</p>
                 </div>
                 <div className="mb-4">
                   <label className="block text-sm font-medium text-gray-700 mb-1">Business Name</label>
@@ -688,7 +949,6 @@ export default function Staff() {
                     className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
                     placeholder="My Business"
                   />
-                  <p className="mt-1 text-xs text-gray-500">Displayed at the top of the app.</p>
                 </div>
                 <div className="mb-4">
                   <label className="block text-sm font-medium text-gray-700 mb-1">Business Username</label>
@@ -699,7 +959,6 @@ export default function Staff() {
                     className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
                     placeholder="@Goal_sale"
                   />
-                  <p className="mt-1 text-xs text-gray-500">Optional. Used for login instead of email. Must start with @, letters, numbers, underscores only.</p>
                 </div>
                 <div className="mb-4">
                   <label className="block text-sm font-medium text-gray-700 mb-1">

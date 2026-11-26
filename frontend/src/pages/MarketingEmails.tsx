@@ -6,8 +6,10 @@ import { mediaApi } from '../api/media'
 import { Plus, Edit, Trash2, X, Send, Bold, Italic, Underline, X as XIcon, Copy, CheckCircle, AlertCircle, Upload, Check } from 'lucide-react'
 import ConfirmationModal from '../components/ConfirmationModal'
 import FeedbackButton from '../components/FeedbackButton'
+import { useStore } from '../contexts/StoreContext'
 
 export default function MarketingEmails() {
+  const { currentStore } = useStore()
   const [showModal, setShowModal] = useState(false)
   const [editingTemplate, setEditingTemplate] = useState<any>(null)
   const [showBroadcastModal, setShowBroadcastModal] = useState(false)
@@ -34,8 +36,10 @@ export default function MarketingEmails() {
   }
 
   const { data: templates, isLoading, error: templatesError } = useQuery({
-    queryKey: ['marketing-templates', searchTerm, page, pageSize],
+    queryKey: ['marketing-templates', currentStore?.id, searchTerm, page, pageSize],
     queryFn: () => marketingEmailsApi.getAll(searchTerm || undefined, { skip: page * pageSize, limit: pageSize }),
+    staleTime: 60_000,
+    gcTime: 5 * 60 * 1000,
   })
 
   useEffect(() => {
@@ -656,7 +660,7 @@ export default function MarketingEmails() {
                   </p>
                 </div>
                 <div>
-                  <label className="flex items-center">
+                  <div className="flex items-center">
                     <input
                       type="checkbox"
                       checked={autoBroadcastEnabled}
@@ -664,14 +668,14 @@ export default function MarketingEmails() {
                       className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
                     />
                     <span className="ml-2 text-sm text-gray-700">Enable Auto-Broadcast</span>
-                  </label>
+                  </div>
                   <p className="mt-1 text-xs text-gray-500 ml-6">
                     If enabled, the email will automatically broadcast based on the frequency period. If disabled, the email only broadcasts when you click broadcast.
                   </p>
                 </div>
                 {(!editingTemplate?.id || !editingTemplate?.is_default) && (
                   <div>
-                    <label className="flex items-center">
+                    <div className="flex items-center">
                       <input
                         type="checkbox"
                         checked={isDefault}
@@ -680,7 +684,7 @@ export default function MarketingEmails() {
                         className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded disabled:opacity-50"
                       />
                       <span className="ml-2 text-sm text-gray-700">Default Template</span>
-                    </label>
+                    </div>
                     <p className="mt-1 text-xs text-gray-500 ml-6">
                       Default template is pinned at the top and sends unique emails to each client based on expired subscriptions. Cannot be duplicated or deleted.
                     </p>
@@ -842,9 +846,9 @@ export default function MarketingEmails() {
                     <p className="text-sm text-gray-500 p-2">No products available</p>
                   ) : (
                     products.map((product) => (
-                      <label 
+                      <div 
                         key={product.id} 
-                        className={`flex items-center p-2 hover:bg-gray-50 cursor-pointer ${sendToAllClients ? 'opacity-50' : ''}`}
+                        className={`flex items-center p-2 hover:bg-gray-50 ${sendToAllClients ? 'opacity-50' : ''}`}
                       >
                         <input
                           type="checkbox"
@@ -854,7 +858,7 @@ export default function MarketingEmails() {
                           className="mr-2 disabled:opacity-50 disabled:cursor-not-allowed"
                         />
                         <span className="text-sm">{product.name}</span>
-                      </label>
+                      </div>
                     ))
                   )}
                 </div>
@@ -867,7 +871,7 @@ export default function MarketingEmails() {
 
               {/* Send to All Clients Option */}
               <div className="border-t pt-4">
-                <label className="flex items-center">
+                <div className="flex items-center">
                   <input
                     type="checkbox"
                     checked={sendToAllClients}
@@ -884,7 +888,7 @@ export default function MarketingEmails() {
                   <span className="ml-2 text-sm font-medium text-gray-700">
                     Send to All Clients
                   </span>
-                </label>
+                </div>
                 <p className="mt-1 text-xs text-gray-500 ml-6">
                   Send to all clients regardless of products purchased. This option is disabled when products are selected.
                 </p>

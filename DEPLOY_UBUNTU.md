@@ -1,4 +1,4 @@
-# Deploy Yandex Market Manager on Ubuntu (without Docker)
+# Deploy Online Store on Ubuntu (without Docker)
 
 These steps are for a **fresh Ubuntu VPS** (22.04 or 24.04). You will install PostgreSQL, Python 3.11, Node.js, run the backend and frontend, and optionally use Nginx in front.
 

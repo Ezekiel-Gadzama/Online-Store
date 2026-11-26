@@ -1,0 +1,59 @@
+# Yandex Market on develop-vps (alongside church-app).
+# Host ports chosen to avoid church-app: 3000, 3101, 8090, 8101, 5432, 6379.
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: yandex-market-postgres
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-yandex_user}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-yandex_password}
+      - POSTGRES_DB=${POSTGRES_DB:-yandex_market}
+    volumes:
+      - yandex_postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5440:5432"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-yandex_user} -d ${POSTGRES_DB:-yandex_market}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: yandex-market-backend
+    ports:
+      - "8010:8000"
+    volumes:
+      - ./media:/app/media
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-yandex_user}:${POSTGRES_PASSWORD:-yandex_password}@postgres:5432/${POSTGRES_DB:-yandex_market}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: yandex-market-frontend
+    ports:
+      - "3010:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  yandex_postgres_data:

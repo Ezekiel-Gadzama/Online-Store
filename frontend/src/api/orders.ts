@@ -36,16 +36,37 @@ export interface Order {
   updated_at?: string
   completed_at?: string
   order_created_at?: string  // Actual order creation date from Yandex API
+  marketplace?: string | null
+  assigned_to_user_id?: number | null
+  assigned_to_name?: string | null
+  has_chat?: boolean | null
 }
 
 export const ordersApi = {
-  getAll: async (params?: { status?: string; start_date?: string; end_date?: string; skip?: number; limit?: number; refresh_status?: boolean; is_digital?: boolean }) => {
+  getAll: async (params?: {
+    status?: string
+    start_date?: string
+    end_date?: string
+    skip?: number
+    limit?: number
+    refresh_status?: boolean
+    is_digital?: boolean
+    assigned_to?: string
+  }) => {
     const response = await apiClient.get<Order[]>('/orders/', { params })
     return response.data
   },
 
   getPendingCounts: async () => {
     const response = await apiClient.get<{ digital: number; physical: number }>('/orders/pending-counts')
+    return response.data
+  },
+
+  getStatusCounts: async (params?: { is_digital?: boolean; start_date?: string; end_date?: string }) => {
+    const response = await apiClient.get<{ pending: number; processing: number; completed: number; cancelled: number; finished: number }>(
+      '/orders/status-counts',
+      { params }
+    )
     return response.data
   },
   
@@ -66,6 +87,25 @@ export const ordersApi = {
   
   markFinished: async (id: number) => {
     const response = await apiClient.post(`/orders/${id}/mark-finished`)
+    return response.data
+  },
+
+  getAssignees: async (marketplace: string = 'yandex') => {
+    const response = await apiClient.get<{ id: number; name: string | null; email: string; is_admin: boolean }[]>(
+      '/orders/assignees',
+      { params: { marketplace } },
+    )
+    return response.data
+  },
+
+  assignOrder: async (yandexOrderId: string, assignToUserId?: number) => {
+    const response = await apiClient.post<{
+      success: boolean
+      assigned_to_user_id: number
+      assigned_to_name: string | null
+    }>(`/orders/by-yandex-id/${yandexOrderId}/assign`, {
+      assign_to_user_id: assignToUserId ?? null,
+    })
     return response.data
   },
 }

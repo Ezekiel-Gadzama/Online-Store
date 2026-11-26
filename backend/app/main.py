@@ -3,9 +3,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
 from app.database import engine, Base, SessionLocal
-from app.routers import products, orders, dashboard, email_templates as activation_templates, sync, webhooks, reviews, chat, media, inventory, settings as settings_router, clients, marketing_emails, documentations, auth, staff
+from app.routers import products, orders, dashboard, email_templates as activation_templates, sync, webhooks, reviews, chat, media, inventory, settings as settings_router, clients, marketing_emails, documentations, auth, staff, stores, marketplace_connections
 from app.config import settings
-from app.initial_data import create_default_email_template
 from app.services.yandex_api import YandexMarketAPI
 from app.services.review_checker import review_checker
 from app import models
@@ -67,7 +66,7 @@ def _is_digital_product(yandex_product_data: dict) -> bool:
     print(f"  ❌ Product {offer_id}: Not a digital product (no parameterId 37693330 with electronic key)")
     return False
 
-def _sync_products_sync(business_id: int = None):
+def _sync_products_sync(business_id: int = None, store_id: int = None):
     """Sync products FROM Yandex Market TO local database (one-way sync)
     
     Always updates existing products to reflect changes from Yandex (like status changes).
@@ -83,7 +82,7 @@ def _sync_products_sync(business_id: int = None):
     try:
         db = SessionLocal()
         try:
-            yandex_api = YandexMarketAPI(business_id=business_id, db=db)
+            yandex_api = YandexMarketAPI(business_id=business_id, db=db, store_id=store_id)
             yandex_products = yandex_api.get_products()
             
             products_created = 0
@@ -110,7 +109,10 @@ def _sync_products_sync(business_id: int = None):
                         yandex_id = yandex_product.get("id") or yandex_product.get("offerId")
                         yandex_sku = yandex_product.get("sku") or yandex_product.get("shopSku") or yandex_product.get("vendorCode") or yandex_id
                     
-                    existing_product = db.query(models.Product).filter(
+                    product_q = db.query(models.Product).filter(models.Product.business_id == business_id)
+                    if store_id:
+                        product_q = product_q.filter(models.Product.store_id == store_id)
+                    existing_product = product_q.filter(
                         (models.Product.yandex_market_id == yandex_id) |
                         (models.Product.yandex_market_sku == yandex_sku)
                     ).first()
@@ -258,6 +260,8 @@ def _sync_products_sync(business_id: int = None):
                         is_digital = _is_digital_product(yandex_product)
                         
                         new_product = models.Product(
+                            business_id=business_id,
+                            store_id=store_id,
                             name=product_name,
                             description=yandex_product.get("description"),
                             yandex_market_id=yandex_id,
@@ -293,7 +297,7 @@ def _sync_products_sync(business_id: int = None):
         import traceback
         traceback.print_exc()
 
-def _parse_yandex_order(yandex_order: dict, db, business_id: int = None) -> list:
+def _parse_yandex_order(yandex_order: dict, db, business_id: int = None, store_id: int = None) -> list:
     """Parse a Yandex Market order and create local Order records.
     
     Yandex orders contain an 'items' array. Each item has:
@@ -429,10 +433,16 @@ def _parse_yandex_order(yandex_order: dict, db, business_id: int = None) -> list
                 print(f"  ⚠️  Could not parse creationDate '{creation_date_str}': {str(e)}")
                 order_created_at = None
         
+        from app.marketplace_service import primary_yandex_connection_id
+
+        conn_id = primary_yandex_connection_id(db, store_id) if store_id else None
         new_order = models.Order(
             yandex_order_id=yandex_order_id,
             product_id=product.id,
             business_id=product.business_id,  # Use product's business_id
+            store_id=store_id,
+            marketplace="yandex",
+            marketplace_connection_id=conn_id,
             customer_name=buyer_name,
             customer_email=None,  # Yandex doesn't expose buyer email for privacy
             customer_phone=None,  # Yandex doesn't expose buyer phone for privacy
@@ -803,7 +813,7 @@ def _auto_send_activations_for_existing_orders(db):
         traceback.print_exc()
 
 
-def _sync_orders_sync(business_id: int = None):
+def _sync_orders_sync(business_id: int = None, store_id: int = None):
     """Synchronous order sync function - pulls orders from Yandex Market
     
     Args:
@@ -816,7 +826,7 @@ def _sync_orders_sync(business_id: int = None):
     try:
         db = SessionLocal()
         try:
-            yandex_api = YandexMarketAPI(business_id=business_id, db=db)
+            yandex_api = YandexMarketAPI(business_id=business_id, db=db, store_id=store_id)
             yandex_orders = yandex_api.get_orders()
             
             orders_created = 0
@@ -1011,6 +1021,9 @@ def _sync_orders_sync(business_id: int = None):
                                         yandex_order_id=yandex_order_id,
                                         product_id=product.id,
                                         business_id=product.business_id,  # Use product's business_id
+                                        store_id=store_id,
+                                        marketplace="yandex",
+                                        marketplace_connection_id=primary_yandex_connection_id(db, store_id) if store_id else None,
                                         customer_name=buyer_name,
                                         customer_email=None,
                                         customer_phone=None,
@@ -1042,7 +1055,9 @@ def _sync_orders_sync(business_id: int = None):
                         # Parse and create new orders from items - Yandex API is source of truth
                         # Create ONE Order record per item in the Yandex order
                         # Note: _sync_orders_sync should pass business_id, but for backward compatibility, we allow None
-                        parsed_orders = _parse_yandex_order(yandex_order, db, business_id=business_id)
+                        parsed_orders = _parse_yandex_order(
+                            yandex_order, db, business_id=business_id, store_id=store_id
+                        )
                         
                         if not parsed_orders:
                             items = yandex_order.get("items", [])
@@ -1122,11 +1137,24 @@ async def auto_sync_orders():
     await loop.run_in_executor(executor, _sync_orders_sync)
 
 async def periodic_sync():
-    """Periodic sync task - runs every 5 minutes"""
+    """Periodic sync task - runs automatically in Docker/standalone.
+    Orders: every 60 seconds. Products: every 15 minutes."""
+    from app.jobs.sync_jobs import run_order_sync, run_product_sync
+
+    loop = asyncio.get_event_loop()
+    run_count = 0
+    await asyncio.sleep(10)  # Let app fully start before first sync
     while True:
-        await asyncio.sleep(300)  # 5 minutes
-        await auto_sync_products()
-        await auto_sync_orders()
+        run_count += 1
+        try:
+            await loop.run_in_executor(executor, run_order_sync)
+            if run_count % 15 == 0:  # Products every 15 minutes
+                await loop.run_in_executor(executor, run_product_sync)
+        except Exception as e:
+            print(f"[Periodic Sync] Error: {e}")
+            import traceback
+            traceback.print_exc()
+        await asyncio.sleep(60)  # 1 minute between runs
 
 
 # Business summary functionality removed
@@ -1140,440 +1168,42 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"Warning: Could not create tables automatically: {e}")
     
-    # Add attachments columns if they don't exist (migration)
     from app.database import SessionLocal
-    from sqlalchemy import text
     db = SessionLocal()
     try:
-        # Add column to email_templates
-        db.execute(text("""
-            ALTER TABLE email_templates 
-            ADD COLUMN IF NOT EXISTS attachments JSONB DEFAULT '[]'::jsonb
-        """))
-        
-        # Add activate_till_days column to email_templates
-        db.execute(text("""
-            ALTER TABLE email_templates 
-            ADD COLUMN IF NOT EXISTS activate_till_days INTEGER DEFAULT 30
-        """))
-        
-        # Add column to marketing_email_templates
-        db.execute(text("""
-            ALTER TABLE marketing_email_templates 
-            ADD COLUMN IF NOT EXISTS attachments JSONB DEFAULT '[]'::jsonb
-        """))
-        
-        # Add yandex_order_data column to orders table (stores full Yandex order JSON with items[].id)
-        db.execute(text("""
-            ALTER TABLE orders 
-            ADD COLUMN IF NOT EXISTS yandex_order_data JSONB
-        """))
-        
-        # Add yandex_status column to orders table (raw Yandex status string)
-        db.execute(text("""
-            ALTER TABLE orders 
-            ADD COLUMN IF NOT EXISTS yandex_status VARCHAR
-        """))
-        
-        # Add auto_activation_enabled column to app_settings table
-        db.execute(text("""
-            ALTER TABLE app_settings 
-            ADD COLUMN IF NOT EXISTS auto_activation_enabled BOOLEAN DEFAULT FALSE
-        """))
-        
-        # Add auto_append_clients column to app_settings table
-        db.execute(text("""
-            ALTER TABLE app_settings 
-            ADD COLUMN IF NOT EXISTS auto_append_clients BOOLEAN DEFAULT FALSE
-        """))
+        from app.schema_bootstrap import ensure_database_schema
 
-        # Add timezone column to app_settings table (UI / Localization)
-        # Needed for user-selectable display timezone in Settings.
-        try:
-            db.execute(text("""
-                ALTER TABLE app_settings
-                ADD COLUMN IF NOT EXISTS timezone VARCHAR
-            """))
-            db.commit()  # commit early so Settings API won't fail even if later migrations error
-            print("✅ Added timezone column to app_settings")
-        except Exception as e:
-            db.rollback()
-            print(f"⚠️  Warning: Could not add timezone column to app_settings: {str(e)}")
-        
-        # Add smtp_user column to app_settings table
-        db.execute(text("""
-            ALTER TABLE app_settings 
-            ADD COLUMN IF NOT EXISTS smtp_user VARCHAR
-        """))
-        
-        # Add yandex_purchase_link and usage_period columns to products table
-        db.execute(text("""
-            ALTER TABLE products 
-            ADD COLUMN IF NOT EXISTS yandex_purchase_link VARCHAR
-        """))
-        db.execute(text("""
-            ALTER TABLE products 
-            ADD COLUMN IF NOT EXISTS usage_period INTEGER
-        """))
-        
-        # Add order_created_at column to orders table (actual order creation date from Yandex)
-        db.execute(text("""
-            ALTER TABLE orders 
-            ADD COLUMN IF NOT EXISTS order_created_at TIMESTAMP WITH TIME ZONE
-        """))
-        
-        # Add order_ids column to clients table
-        db.execute(text("""
-            ALTER TABLE clients 
-            ADD COLUMN IF NOT EXISTS order_ids JSONB DEFAULT '[]'::jsonb
-        """))
-        
-        # Add purchase_dates_history column to client_products table
-        db.execute(text("""
-            ALTER TABLE client_products 
-            ADD COLUMN IF NOT EXISTS purchase_dates_history JSONB DEFAULT '[]'::jsonb
-        """))
-        
-        # Add frequency_days, auto_broadcast_enabled, and is_default columns to marketing_email_templates table
-        db.execute(text("""
-            ALTER TABLE marketing_email_templates 
-            ADD COLUMN IF NOT EXISTS frequency_days INTEGER
-        """))
-        db.execute(text("""
-            ALTER TABLE marketing_email_templates 
-            ADD COLUMN IF NOT EXISTS auto_broadcast_enabled BOOLEAN DEFAULT FALSE
-        """))
-        db.execute(text("""
-            ALTER TABLE marketing_email_templates 
-            ADD COLUMN IF NOT EXISTS is_default BOOLEAN DEFAULT FALSE
-        """))
-        
-        # Create product_cost_history table (cost per product with date range for profit calculation)
-        db.execute(text("""
-            CREATE TABLE IF NOT EXISTS product_cost_history (
-                id SERIAL PRIMARY KEY,
-                product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
-                amount DOUBLE PRECISION NOT NULL,
-                start_date DATE NOT NULL,
-                end_date DATE,
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-            )
-        """))
-        db.execute(text("""
-            CREATE INDEX IF NOT EXISTS idx_product_cost_history_product_id ON product_cost_history(product_id)
-        """))
-        db.execute(text("""
-            CREATE INDEX IF NOT EXISTS idx_product_cost_history_dates ON product_cost_history(product_id, start_date, end_date)
-        """))
-
-        # Create chat_read_status table if it doesn't exist
-        db.execute(text("""
-            CREATE TABLE IF NOT EXISTS chat_read_status (
-                id SERIAL PRIMARY KEY,
-                order_id VARCHAR NOT NULL UNIQUE,
-                last_viewed_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
-                last_message_id VARCHAR,
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-                updated_at TIMESTAMP WITH TIME ZONE
-            )
-        """))
-        db.execute(text("""
-            CREATE INDEX IF NOT EXISTS idx_chat_read_status_order_id ON chat_read_status(order_id)
-        """))
-        
-        # Migration: Remove Telegram columns from app_settings
-        try:
-            db.execute(text("""
-                ALTER TABLE app_settings 
-                DROP COLUMN IF EXISTS telegram_bot_token
-            """))
-            db.execute(text("""
-                ALTER TABLE app_settings 
-                DROP COLUMN IF EXISTS telegram_chat_id
-            """))
-            db.execute(text("""
-                ALTER TABLE app_settings 
-                DROP COLUMN IF EXISTS notify_new_orders
-            """))
-            db.execute(text("""
-                ALTER TABLE app_settings 
-                DROP COLUMN IF EXISTS notify_order_status_changes
-            """))
-            db.execute(text("""
-                ALTER TABLE app_settings 
-                DROP COLUMN IF EXISTS notify_new_reviews
-            """))
-            db.execute(text("""
-                ALTER TABLE app_settings 
-                DROP COLUMN IF EXISTS notify_review_replies
-            """))
-            db.execute(text("""
-                ALTER TABLE app_settings 
-                DROP COLUMN IF EXISTS notify_email_broadcasts
-            """))
-            db.execute(text("""
-                ALTER TABLE app_settings 
-                DROP COLUMN IF EXISTS notify_new_clients
-            """))
-            print("✅ Removed Telegram columns from app_settings")
-        except Exception as e:
-            print(f"⚠️  Warning: Could not remove Telegram columns: {str(e)}")
-        
-        # Migration: Remove media columns from products
-        try:
-            db.execute(text("""
-                ALTER TABLE products 
-                DROP COLUMN IF EXISTS yandex_images
-            """))
-            db.execute(text("""
-                ALTER TABLE products 
-                DROP COLUMN IF EXISTS yandex_videos
-            """))
-            print("✅ Removed media columns from products")
-        except Exception as e:
-            print(f"⚠️  Warning: Could not remove media columns: {str(e)}")
-        
-        # Migration: Fix unique constraints on products for multi-tenancy
-        # Change from global unique to per-business unique
-        try:
-            # First, update existing products without business_id to have business_id = 1 (first admin)
-            # This must happen BEFORE dropping constraints to avoid conflicts
-            # Get the first admin user's ID
-            first_admin = db.execute(text("""
-                SELECT id FROM users WHERE is_admin = true ORDER BY id LIMIT 1
-            """)).first()
-            
-            if first_admin:
-                admin_id = first_admin[0]
-                db.execute(text(f"""
-                    UPDATE products 
-                    SET business_id = {admin_id}
-                    WHERE business_id IS NULL
-                """))
-                db.commit()
-                print(f"✅ Updated existing products to have business_id = {admin_id}")
-            else:
-                print("⚠️  No admin user found - cannot update products without business_id")
-            
-            # Drop old unique constraints/indexes if they exist
-            db.execute(text("""
-                DROP INDEX IF EXISTS ix_products_yandex_market_id
-            """))
-            db.execute(text("""
-                DROP INDEX IF EXISTS ix_products_yandex_market_sku
-            """))
-            # Drop unique constraints if they exist
-            db.execute(text("""
-                ALTER TABLE products 
-                DROP CONSTRAINT IF EXISTS products_yandex_market_id_key
-            """))
-            db.execute(text("""
-                ALTER TABLE products 
-                DROP CONSTRAINT IF EXISTS products_yandex_market_sku_key
-            """))
-            
-            # Recreate indexes (non-unique, for performance)
-            db.execute(text("""
-                CREATE INDEX IF NOT EXISTS ix_products_yandex_market_id ON products(yandex_market_id)
-            """))
-            db.execute(text("""
-                CREATE INDEX IF NOT EXISTS ix_products_yandex_market_sku ON products(yandex_market_sku)
-            """))
-            
-            # Drop existing composite constraints if they exist (in case migration was partially run)
-            db.execute(text("""
-                ALTER TABLE products 
-                DROP CONSTRAINT IF EXISTS uq_product_business_yandex_id
-            """))
-            db.execute(text("""
-                ALTER TABLE products 
-                DROP CONSTRAINT IF EXISTS uq_product_business_yandex_sku
-            """))
-            
-            # Add composite unique constraints (unique per business)
-            # Only add if there are no duplicate (business_id, yandex_market_sku) pairs
-            db.execute(text("""
-                ALTER TABLE products 
-                ADD CONSTRAINT uq_product_business_yandex_id 
-                UNIQUE (business_id, yandex_market_id)
-            """))
-            db.execute(text("""
-                ALTER TABLE products 
-                ADD CONSTRAINT uq_product_business_yandex_sku 
-                UNIQUE (business_id, yandex_market_sku)
-            """))
-            
-            db.commit()
-            print("✅ Fixed product unique constraints for multi-tenancy")
-        except Exception as e:
-            db.rollback()
-            print(f"⚠️  Warning: Could not fix product unique constraints: {str(e)}")
-            import traceback
-            traceback.print_exc()
-        
-        # Migration: Update existing orders to have business_id from their products
-        try:
-            # Get the first admin user's ID
-            first_admin = db.execute(text("""
-                SELECT id FROM users WHERE is_admin = true ORDER BY id LIMIT 1
-            """)).first()
-            
-            if first_admin:
-                admin_id = first_admin[0]
-                # Update orders that don't have business_id by getting it from their product
-                db.execute(text(f"""
-                    UPDATE orders 
-                    SET business_id = (
-                        SELECT business_id 
-                        FROM products 
-                        WHERE products.id = orders.product_id
-                    )
-                    WHERE orders.business_id IS NULL
-                """))
-                
-                # For orders where product doesn't exist or product doesn't have business_id,
-                # set to first admin's ID as fallback
-                db.execute(text(f"""
-                    UPDATE orders 
-                    SET business_id = {admin_id}
-                    WHERE orders.business_id IS NULL
-                """))
-                
-                db.commit()
-                print(f"✅ Updated existing orders to have business_id")
-            else:
-                print("⚠️  No admin user found - cannot update orders without business_id")
-        except Exception as e:
-            db.rollback()
-            print(f"⚠️  Warning: Could not update orders business_id: {str(e)}")
-            import traceback
-            traceback.print_exc()
-        
-        # Migration: Update orders table to support multiple Order records per Yandex order
-        # Remove unique constraint/index on yandex_order_id and add composite unique constraint
-        try:
-            # Check if the old unique constraint exists
-            result = db.execute(text("""
-                SELECT constraint_name 
-                FROM information_schema.table_constraints 
-                WHERE table_name = 'orders' 
-                AND constraint_type = 'UNIQUE' 
-                AND constraint_name LIKE '%yandex_order_id%'
-            """)).first()
-            
-            if result:
-                # Drop the old unique constraint
-                constraint_name = result[0]
-                db.execute(text(f"""
-                    ALTER TABLE orders 
-                    DROP CONSTRAINT IF EXISTS {constraint_name}
-                """))
-                print(f"✅ Dropped old unique constraint on yandex_order_id: {constraint_name}")
-            
-            # Also check for unique indexes (not just constraints)
-            result = db.execute(text("""
-                SELECT indexname 
-                FROM pg_indexes 
-                WHERE tablename = 'orders' 
-                AND indexname LIKE '%yandex_order_id%'
-                AND indexdef LIKE '%UNIQUE%'
-            """)).first()
-            
-            if result:
-                # Drop the old unique index
-                index_name = result[0]
-                db.execute(text(f"""
-                    DROP INDEX IF EXISTS {index_name}
-                """))
-                print(f"✅ Dropped old unique index on yandex_order_id: {index_name}")
-            
-            # Check if the composite unique constraint already exists
-            result = db.execute(text("""
-                SELECT constraint_name 
-                FROM information_schema.table_constraints 
-                WHERE table_name = 'orders' 
-                AND constraint_type = 'UNIQUE' 
-                AND constraint_name = 'uq_order_yandex_product'
-            """)).first()
-            
-            if not result:
-                # Add composite unique constraint
-                db.execute(text("""
-                    ALTER TABLE orders 
-                    ADD CONSTRAINT uq_order_yandex_product 
-                    UNIQUE (yandex_order_id, product_id)
-                """))
-                print("✅ Added composite unique constraint on (yandex_order_id, product_id)")
-            else:
-                print("✅ Composite unique constraint already exists")
-        except Exception as e:
-            print(f"⚠️  Warning: Could not update orders table constraints: {str(e)}")
-            import traceback
-            traceback.print_exc()
-        
-        # Add FINISHED to orderstatus enum type
-        try:
-            # First check if the enum value exists
-            result = db.execute(text("""
-                SELECT EXISTS (
-                    SELECT 1 FROM pg_enum 
-                    WHERE enumlabel = 'finished' 
-                    AND enumtypid = (SELECT oid FROM pg_type WHERE typname = 'orderstatus')
-                ) as exists;
-            """)).first()
-            
-            if not result or not result[0]:
-                # Add the value if it doesn't exist
-                # PostgreSQL doesn't support IF NOT EXISTS for ALTER TYPE, so we use a DO block
-                db.execute(text("""
-                    DO $$ 
-                    BEGIN
-                        IF NOT EXISTS (
-                            SELECT 1 FROM pg_enum 
-                            WHERE enumlabel = 'finished' 
-                            AND enumtypid = (SELECT oid FROM pg_type WHERE typname = 'orderstatus')
-                        ) THEN
-                            ALTER TYPE orderstatus ADD VALUE 'finished';
-                        END IF;
-                    END $$;
-                """))
-                db.commit()
-                print("✅ Added 'finished' to orderstatus enum")
-            else:
-                print("✅ 'finished' already exists in orderstatus enum")
-        except Exception as e:
-            # If enum doesn't exist or already has the value, continue
-            print(f"⚠️  Warning: Could not add 'finished' to orderstatus enum: {str(e)}")
-            print(f"Note: Could not add 'finished' to orderstatus enum: {e}")
-        
-        db.commit()
+        ensure_database_schema(db)
+        print("✅ Database schema ready (create_all + indexes)")
     except Exception as e:
-        db.rollback()
-        print(f"Warning: Could not run migrations: {e}")
+        print(f"⚠️  Schema bootstrap: {e}")
     finally:
         db.close()
+
+    try:
+        from app.store_bootstrap import run_legacy_data_backfill, ensure_default_stores
+
+        db_stores = SessionLocal()
+        try:
+            run_legacy_data_backfill(db_stores)
+            ensure_default_stores(db_stores)
+            print("✅ Market store rows ready")
+        finally:
+            db_stores.close()
+    except Exception as e:
+        print(f"⚠️  Market store bootstrap: {e}")
     
-    # Create default email template and settings
     try:
-        create_default_email_template()
-    except Exception:
-        pass
-    try:
-        from app.initial_data import create_default_settings, create_default_marketing_email_template
-        create_default_settings()
+        from app.initial_data import create_default_marketing_email_template
+
         create_default_marketing_email_template()
     except Exception:
         pass
     
-    # Initial sync on startup - DISABLED
-    # Each business must configure their own Yandex API settings in the Settings page
-    # Sync will only work when triggered manually by an admin who has configured their settings
-    print("[Startup] Skipping automatic sync - each business must configure their own Yandex API settings")
-    print("[Startup] Admins can trigger sync manually from the Sync page after configuring settings")
-    
-    # Periodic sync is also disabled - requires business_id
-    # sync_task = asyncio.create_task(periodic_sync())
-    sync_task = None
+    # Periodic sync runs automatically - syncs orders (every 1 min) and products (every 15 min)
+    # for all businesses with Yandex API configured in Settings
+    print("[Startup] Starting periodic sync (orders every 1 min, products every 15 min)")
+    sync_task = asyncio.create_task(periodic_sync())
     
     # Review checker is disabled - requires business_id
     # Each business can check reviews manually or we can implement per-business review checking later
@@ -1601,8 +1231,8 @@ async def lifespan(app: FastAPI):
     # Business summary task removed
 
 app = FastAPI(
-    title="Yandex Market Digital Products Manager",
-    description="Complete ecosystem for managing digital products on Yandex Market",
+    title="Online Store API",
+    description="Multi-store admin: marketplaces, products, orders, and digital fulfillment",
     version="1.0.0",
     lifespan=lifespan,
     redirect_slashes=False
@@ -1641,11 +1271,17 @@ app.include_router(marketing_emails.router, prefix="/api/marketing-emails", tags
 app.include_router(documentations.router, prefix="/api/documentations", tags=["documentations"])
 app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
 app.include_router(staff.router, prefix="/api/staff", tags=["staff"])
+app.include_router(stores.router, prefix="/api/stores", tags=["stores"])
+app.include_router(
+    marketplace_connections.router,
+    prefix="/api/marketplace-connections",
+    tags=["marketplace-connections"],
+)
 
 
 @app.get("/")
 async def root():
-    return {"message": "Yandex Market Digital Products Manager API"}
+    return {"message": "Online Store API"}
 
 
 @app.post("/webhook")

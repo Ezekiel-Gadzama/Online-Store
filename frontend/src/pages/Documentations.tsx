@@ -18,6 +18,8 @@ export default function Documentations() {
   const { data: documentations, isLoading } = useQuery({
     queryKey: ['documentations', searchTerm, page, pageSize],
     queryFn: () => documentationsApi.getAll(searchTerm || undefined, { skip: page * pageSize, limit: pageSize }),
+    staleTime: 60_000,
+    gcTime: 5 * 60 * 1000,
   })
 
   useEffect(() => {

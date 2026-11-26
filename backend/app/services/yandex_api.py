@@ -12,7 +12,7 @@ from app.database import SessionLocal
 class YandexMarketAPI:
     """Service for interacting with Yandex Market Partner API"""
     
-    def __init__(self, business_id: int = None, db=None):
+    def __init__(self, business_id: int = None, db=None, store_id: int = None):
         """Initialize YandexMarketAPI with business-specific settings
         
         Args:
@@ -31,7 +31,8 @@ class YandexMarketAPI:
         
         try:
             from app.services.config_validator import validate_yandex_config
-            app_settings = validate_yandex_config(business_id, db)
+            app_settings = validate_yandex_config(business_id, db, store_id)
+            self.store_id = store_id
             
             # Use database settings only
             self.api_token = app_settings.yandex_api_token.strip() if app_settings.yandex_api_token else None
@@ -49,14 +50,20 @@ class YandexMarketAPI:
         self.is_acma_token = self.api_token.startswith("ACMA:")
         
         if self.is_acma_token:
-            # ACMA tokens use Campaign API for products/orders - need campaign_id
-            # But can also use Business API for reviews if business_id is provided
-            if not self.campaign_id:
-                raise ValueError("Yandex Market Campaign ID is required when using ACMA tokens. Please configure it in the Settings page.")
-            if self.business_id:
-                print("ℹ️  Using ACMA token with Campaign API (campaign_id: {}) and Business API (business_id: {})".format(self.campaign_id, self.business_id))
+            if not self.campaign_id and not self.business_id:
+                raise ValueError(
+                    "Configure Yandex Market campaign_id or business_id for ACMA tokens in Settings."
+                )
+            if self.campaign_id and self.business_id:
+                print(
+                    "ℹ️  ACMA token — campaign_id {} and business_id {}".format(
+                        self.campaign_id, self.business_id
+                    )
+                )
+            elif self.campaign_id:
+                print("ℹ️  ACMA token — campaign_id {}".format(self.campaign_id))
             else:
-                print("ℹ️  Using ACMA token with Campaign API (campaign_id: {}). Note: business_id is recommended for reviews access.".format(self.campaign_id))
+                print("ℹ️  ACMA token — business_id {} (no campaign yet)".format(self.business_id))
         else:
             # OAuth tokens use Business API - need business_id
             if not self.business_id:
@@ -89,6 +96,9 @@ class YandexMarketAPI:
         else:
             # Regular OAuth token - add OAuth prefix
             headers["Authorization"] = f"OAuth {self.api_token}"
+
+        if self.business_id:
+            headers["X-Business-Id"] = str(self.business_id)
         
         return headers
     
@@ -630,21 +640,20 @@ class YandexMarketAPI:
                     print(f"⚠️  Could not fetch test orders: {str(e)}")
         
         elif self.business_id:
-            # Fallback: Business API for orders (if no campaign_id)
-            url = f"{self.base_url}/v2/businesses/{self.business_id}/orders"
-            params = {}
+            # POST v1/businesses/{businessId}/orders (replaces deprecated GET v2/businesses/.../orders)
+            url = f"{self.base_url}/v1/businesses/{self.business_id}/orders"
+            payload: Dict[str, Any] = {"limit": 50}
             if status:
-                params["status"] = status
-            
+                payload["statuses"] = [status]
+
             try:
                 print(f"🔍 Fetching orders from Business API: {url}")
-                response = self._make_request("GET", url, params=params, headers=self._get_headers(), timeout=30.0)
+                response = self._make_request("POST", url, json=payload, headers=self._get_headers(), timeout=30.0)
                 response.raise_for_status()
                 data = response.json()
                 
-                # LOG RAW YANDEX API RESPONSE - NO MODIFICATIONS
                 print("=" * 80)
-                print(f"📋 RAW YANDEX BUSINESS API ORDERS RESPONSE (UNMODIFIED):")
+                print("📋 RAW YANDEX BUSINESS API ORDERS RESPONSE (UNMODIFIED):")
                 print("=" * 80)
                 print(json.dumps(data, indent=2, ensure_ascii=False))
                 print("=" * 80)
@@ -1237,6 +1246,57 @@ class YandexMarketAPI:
                 error_msg += f": {e.response.status_code} - {e.response.text}"
             raise Exception(error_msg)
 
+    def get_chat_by_id(self, chat_id: int) -> Optional[Dict]:
+        """Fetch one chat (GET /v2/businesses/{businessId}/chat)."""
+        if not self.business_id:
+            return None
+        url = f"{self.base_url}/v2/businesses/{self.business_id}/chat"
+        try:
+            with httpx.Client() as client:
+                response = client.get(
+                    url,
+                    params={"chatId": int(chat_id)},
+                    headers=self._get_headers(),
+                    timeout=30.0,
+                )
+                if response.status_code != 200:
+                    return None
+                return response.json().get("result") or None
+        except Exception:
+            return None
+
+    def get_chat_for_order(self, order_id: str) -> Optional[Dict]:
+        """Return Yandex chat record for an order, or None if no chat exists."""
+        if not self.business_id:
+            return None
+        try:
+            order_id_int = int(str(order_id).strip())
+        except ValueError:
+            return None
+        url = f"{self.base_url}/v2/businesses/{self.business_id}/chats"
+        try:
+            with httpx.Client() as client:
+                response = client.post(
+                    url,
+                    json={"orderIds": [order_id_int]},
+                    headers=self._get_headers(),
+                    timeout=30.0,
+                )
+                if response.status_code != 200:
+                    return None
+                chats = response.json().get("result", {}).get("chats", []) or []
+                if not chats:
+                    return None
+                chat = chats[0]
+                chat_id = chat.get("chatId")
+                if chat_id:
+                    detail = self.get_chat_by_id(int(chat_id))
+                    if detail:
+                        return detail
+                return chat
+        except Exception:
+            return None
+
     def get_order_chat_messages(self, order_id: str) -> List[Dict]:
         """Get chat messages for an order
         
@@ -1451,78 +1511,117 @@ class YandexMarketAPI:
         
         return images, videos
     
-    # Inventory and Stock Management
-    def update_product_stock(self, shop_sku: str, count: int, warehouse_id: Optional[int] = None) -> Dict:
-        """
-        Update product stock/quantity on Yandex Market
-        For individual entrepreneurs (ИП), stock management is available for FBS and DBS models
-        """
-        url = f"{self.base_url}/v2/businesses/{self.business_id}/warehouses"
-        
-        items = [{
-            "sku": shop_sku,
-            "count": count
-        }]
-        
+    def list_campaigns(self) -> List[Dict]:
+        """GET v2/campaigns — list stores (limit + pageToken; no page/pageSize/clientId)."""
+        from app.yandex_campaigns import fetch_campaigns_list
+
+        return fetch_campaigns_list(
+            self.api_token,
+            base_url=self.base_url,
+            business_id=self.business_id,
+            limit=100,
+        )
+
+    def verify_api_access(self) -> Dict:
+        """POST v2/auth/token — check token and return grant metadata."""
+        url = f"{self.base_url}/v2/auth/token"
+        response = self._make_request("POST", url, headers=self._get_headers(), timeout=30.0)
+        try:
+            return response.json()
+        except Exception:
+            return {"status": "ERROR", "http_status": response.status_code, "body": response.text}
+
+    def get_partner_warehouses(self) -> List[Dict]:
+        """POST v3/businesses/{businessId}/warehouses — partner warehouses (2026 API)."""
+        url = f"{self.base_url}/v3/businesses/{self.business_id}/warehouses"
+        response = self._make_request("POST", url, json={}, headers=self._get_headers(), timeout=30.0)
+        response.raise_for_status()
+        data = response.json()
+        return data.get("result", {}).get("warehouses", data.get("warehouses", []))
+
+    def _default_partner_warehouse_id(self, warehouse_id: Optional[int] = None) -> int:
         if warehouse_id:
-            items[0]["warehouseId"] = warehouse_id
-        
-        payload = {"skus": items}
-        
+            return warehouse_id
+        warehouses = self.get_partner_warehouses()
+        if not warehouses:
+            raise ValueError(
+                "partnerWarehouseId is required: no warehouses returned from v3/businesses/warehouses"
+            )
+        wh = warehouses[0]
+        wid = wh.get("id") or wh.get("warehouseId") or wh.get("partnerWarehouseId")
+        if wid is None:
+            raise ValueError("Could not determine partner warehouse id from Yandex API response")
+        return int(wid)
+
+    def update_product_stock(self, shop_sku: str, count: int, warehouse_id: Optional[int] = None) -> Dict:
+        """POST v3/businesses/{businessId}/offers/stocks/update"""
+        from datetime import datetime, timezone
+
+        partner_wh = self._default_partner_warehouse_id(warehouse_id)
+        url = f"{self.base_url}/v3/businesses/{self.business_id}/offers/stocks/update"
+        payload = {
+            "skuItems": [{
+                "sku": shop_sku,
+                "partnerWarehouseId": partner_wh,
+                "count": count,
+                "updatedAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            }]
+        }
+        response = self._make_request(
+            "POST", url, json=payload, headers=self._get_headers(), timeout=30.0
+        )
         try:
-            with httpx.Client() as client:
-                response = client.put(
-                    url,
-                    json=payload,
-                    headers=self._get_headers(),
-                    timeout=30.0
-                )
-                response.raise_for_status()
-                return response.json()
+            response.raise_for_status()
+            return response.json()
         except httpx.HTTPError as e:
-            raise Exception(f"Failed to update product stock: {str(e)}")
-    
+            raise Exception(f"Failed to update product stock: {str(e)}") from e
+
     def update_bulk_stocks(self, stocks: List[Dict[str, int]]) -> Dict:
-        """
-        Update stock for multiple products at once
-        stocks: List of dicts with 'sku' and 'count' keys
-        """
-        url = f"{self.base_url}/v2/businesses/{self.business_id}/warehouses"
-        
-        items = [{"sku": stock["sku"], "count": stock["count"]} for stock in stocks]
-        payload = {"skus": items}
-        
+        """POST v3/businesses/{businessId}/offers/stocks/update (bulk)."""
+        from datetime import datetime, timezone
+
+        partner_wh = self._default_partner_warehouse_id(
+            stocks[0].get("warehouse_id") if stocks else None
+        )
+        updated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        url = f"{self.base_url}/v3/businesses/{self.business_id}/offers/stocks/update"
+        payload = {
+            "skuItems": [
+                {
+                    "sku": stock["sku"],
+                    "partnerWarehouseId": stock.get("warehouse_id") or partner_wh,
+                    "count": stock["count"],
+                    "updatedAt": updated_at,
+                }
+                for stock in stocks
+            ]
+        }
+        response = self._make_request(
+            "POST", url, json=payload, headers=self._get_headers(), timeout=30.0
+        )
         try:
-            with httpx.Client() as client:
-                response = client.put(
-                    url,
-                    json=payload,
-                    headers=self._get_headers(),
-                    timeout=30.0
-                )
-                response.raise_for_status()
-                return response.json()
+            response.raise_for_status()
+            return response.json()
         except httpx.HTTPError as e:
-            raise Exception(f"Failed to update bulk stocks: {str(e)}")
-    
-    def get_product_stock(self, shop_sku: str) -> Dict:
-        """Get current stock/quantity for a product"""
-        url = f"{self.base_url}/v2/businesses/{self.business_id}/warehouses"
-        params = {"sku": shop_sku}
-        
+            raise Exception(f"Failed to update bulk stocks: {str(e)}") from e
+
+    def get_product_stock(self, shop_sku: str, warehouse_id: Optional[int] = None) -> Dict:
+        """POST v3/businesses/{businessId}/offers/stocks"""
+        partner_wh = self._default_partner_warehouse_id(warehouse_id)
+        url = f"{self.base_url}/v3/businesses/{self.business_id}/offers/stocks"
+        payload = {
+            "partnerWarehouseId": partner_wh,
+            "offerIds": [shop_sku],
+            "archived": False,
+        }
+        response = self._make_request(
+            "POST", url, json=payload, headers=self._get_headers(), timeout=30.0
+        )
         try:
-            with httpx.Client() as client:
-                response = client.get(
-                    url,
-                    params=params,
-                    headers=self._get_headers(),
-                    timeout=30.0
-                )
-                response.raise_for_status()
-                data = response.json()
-                return data.get("result", {})
+            response.raise_for_status()
+            return response.json().get("result", response.json())
         except httpx.HTTPError as e:
-            raise Exception(f"Failed to get product stock: {str(e)}")
+            raise Exception(f"Failed to get product stock: {str(e)}") from e
     
     # Price Management
     def update_product_price(self, shop_sku: str, price: float, old_price: Optional[float] = None) -> Dict:

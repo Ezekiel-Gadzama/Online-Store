@@ -1,17 +1,42 @@
 import apiClient from './client'
 
+export interface OwnerRestrictions {
+  permissions: Partial<Record<keyof UserPermissions, boolean>>
+  store_market_access?: boolean
+  password_change?: boolean
+}
+
 export interface User {
   id: number
   email: string
   name?: string | null
   is_admin: boolean
+  is_business_admin?: boolean
+  business_admin_all_stores?: boolean
+  owner_restrictions?: OwnerRestrictions | null
   created_by_id: number | null
   permissions: UserPermissions
   is_active: boolean
   business_name?: string | null
   business_username?: string | null
+  timezone?: string | null
+  store_ui_preferences?: Record<
+    string,
+    { selected_marketplaces?: string[]; data_view?: string; active_marketplace?: string | null }
+  > | null
+  store_market_access?: { all_stores?: boolean; stores?: Record<string, string[]> } | null
+  store_permissions?: Record<string, Partial<UserPermissions>> | null
   created_at: string
   updated_at: string | null
+}
+
+export interface UserProfileUpdate {
+  name?: string | null
+  timezone?: string | null
+  store_ui_preferences?: Record<
+    string,
+    { selected_marketplaces?: string[]; data_view?: string; active_marketplace?: string | null }
+  >
 }
 
 export interface UserPermissions {
@@ -21,6 +46,8 @@ export interface UserPermissions {
   view_marketing_emails: boolean
   dashboard_right: boolean
   view_product_prices: boolean
+  create_store: boolean
+  delete_store: boolean
 }
 
 export interface Token {
@@ -77,6 +104,11 @@ export const authApi = {
 
   getMe: async (): Promise<User> => {
     const response = await apiClient.get<User>('/auth/me')
+    return response.data
+  },
+
+  updateProfile: async (data: UserProfileUpdate): Promise<User> => {
+    const response = await apiClient.patch<User>('/auth/me/profile', data)
     return response.data
   },
 

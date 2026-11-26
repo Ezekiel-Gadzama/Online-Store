@@ -1,16 +1,36 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { settingsApi, AppSettingsUpdate } from '../api/settings'
 import { syncApi } from '../api/sync'
 import { useAuth } from '../contexts/AuthContext'
 import { RefreshCw, CheckCircle, Save, Edit2, X, AlertCircle } from 'lucide-react'
+import MarketplaceConnectionsPanel from '../components/MarketplaceConnectionsPanel'
+import { marketplaceConnectionsApi } from '../api/marketplaceConnections'
+import { useStore } from '../contexts/StoreContext'
+import { storesApi } from '../api/stores'
+
+type ConfigTab = 'general' | 'marketplace' | 'smtp' | 'orders'
 
 export default function Settings() {
   const [syncStatus, setSyncStatus] = useState<string>('')
   const [isEditing, setIsEditing] = useState(false)
+  const [searchParams] = useSearchParams()
+  const tabParam = searchParams.get('tab')
+  const [configTab, setConfigTab] = useState<ConfigTab>(() => {
+    if (tabParam === 'marketplace' || tabParam === 'smtp' || tabParam === 'orders' || tabParam === 'general') {
+      return tabParam
+    }
+    return 'general'
+  })
+
+  useEffect(() => {
+    if (tabParam === 'marketplace' || tabParam === 'smtp' || tabParam === 'orders' || tabParam === 'general') {
+      setConfigTab(tabParam)
+    }
+  }, [tabParam])
   const [notification, setNotification] = useState<{ isOpen: boolean; type: 'success' | 'error'; message: string }>({ isOpen: false, type: 'success', message: '' })
   const queryClient = useQueryClient()
-  const [tzSearch, setTzSearch] = useState('')
 
   const showNotification = (type: 'success' | 'error', message: string) => {
     setNotification({ isOpen: true, type, message })
@@ -24,6 +44,27 @@ export default function Settings() {
   })
 
   const { user } = useAuth()
+  const { currentStore, refreshStores } = useStore()
+  const storeTypesMutation = useMutation({
+    mutationFn: (types: string[]) => storesApi.updateStoreTypes(currentStore!.id, types),
+    onSuccess: async (_data, types) => {
+      await refreshStores()
+      queryClient.invalidateQueries({ queryKey: ['marketing-templates'] })
+      queryClient.invalidateQueries({ queryKey: ['email-templates'] })
+      queryClient.invalidateQueries({ queryKey: ['documentations'] })
+      queryClient.invalidateQueries({ queryKey: ['activation-templates'] })
+      queryClient.invalidateQueries({ queryKey: ['app-settings'] })
+      const msg = types.includes('digital')
+        ? 'Digital on'
+        : 'Digital off'
+      showNotification('success', msg)
+    },
+    onError: (error: any) => {
+      const msg =
+        error?.response?.data?.detail || error?.message || 'Failed to save store types.'
+      showNotification('error', typeof msg === 'string' ? msg : JSON.stringify(msg))
+    },
+  })
   const updateSettingsMutation = useMutation({
     mutationFn: (data: AppSettingsUpdate) => settingsApi.update(data),
     onSuccess: async () => {
@@ -34,9 +75,12 @@ export default function Settings() {
       // Wait a bit for the settings to be fully saved, then fetch fresh settings
       setTimeout(async () => {
         try {
-          const freshSettings = await settingsApi.get()
-          const hasYandexConfig = freshSettings.yandex_api_token && 
-            (freshSettings.yandex_business_id || freshSettings.yandex_campaign_id)
+          const conns = await marketplaceConnectionsApi.list()
+          const yandex = conns.find((c) => c.marketplace === 'yandex' && c.is_enabled)
+          const hasYandexConfig = Boolean(
+            yandex?.credentials?.api_token &&
+            (yandex.credentials.business_id || yandex.credentials.campaign_id),
+          )
           
           if (hasYandexConfig && user?.is_admin) {
             try {
@@ -86,9 +130,6 @@ export default function Settings() {
     const formData = new FormData(e.currentTarget)
     
     const data: AppSettingsUpdate = {
-      yandex_api_token: (formData.get('yandex_api_token') as string) || undefined,
-      yandex_business_id: (formData.get('yandex_business_id') as string) || undefined,
-      yandex_campaign_id: (formData.get('yandex_campaign_id') as string) || undefined,
       smtp_host: (formData.get('smtp_host') as string) || undefined,
       smtp_port: formData.get('smtp_port') ? parseInt(formData.get('smtp_port') as string) : undefined,
       smtp_user: (formData.get('smtp_user') as string) || undefined,
@@ -103,7 +144,6 @@ export default function Settings() {
       company_email: (formData.get('company_email') as string) || undefined,
       auto_activation_enabled: formData.get('auto_activation_enabled') === 'on',
       auto_append_clients: formData.get('auto_append_clients') === 'on',
-      timezone: (formData.get('timezone') as string) || undefined,
     }
     
     updateSettingsMutation.mutate(data)
@@ -133,17 +173,8 @@ export default function Settings() {
       <div className="space-y-6">
         {/* Sync Section */}
         <div className="bg-white shadow rounded-lg p-6">
-          <h2 className="text-lg font-medium text-gray-900 mb-4">Yandex Market Sync</h2>
-          <div className="mb-4 p-3 bg-green-50 border border-green-200 rounded-md">
-            <p className="text-sm text-green-800 font-medium mb-1">✓ Automatic Sync Enabled</p>
-            <p className="text-xs text-green-700">
-              Products and orders are automatically synced every 5 minutes. 
-              Orders are also received in real-time via webhooks when configured.
-            </p>
-          </div>
-          <p className="text-sm text-gray-600 mb-4">
-            Manual sync buttons below are available for on-demand syncing if needed.
-          </p>
+          <h2 className="text-lg font-medium text-gray-900 mb-4">Market Sync</h2>
+          <p className="text-sm text-green-800 font-medium mb-4">Auto sync · 5 min</p>
 
           <div className="flex space-x-4">
             <button
@@ -214,143 +245,36 @@ export default function Settings() {
               handleConfigSubmit(e)
               setIsEditing(false)
             }} className="space-y-6">
-              {/* Time zone */}
-              <div>
-                <h3 className="text-md font-medium text-gray-900 mb-3">Time zone</h3>
-                <p className="text-sm text-gray-600 mb-3">
-                  Used for displaying dates and times across the app.
-                </p>
-                {(() => {
-                  const resolved = Intl.DateTimeFormat().resolvedOptions().timeZone
-                  const allZones =
-                    (Intl as any).supportedValuesOf?.('timeZone')?.slice?.() as string[] | undefined
-                  const zones = (allZones && allZones.length > 0)
-                    ? allZones
-                    : ['UTC', 'Europe/Moscow', resolved].filter(Boolean) as string[]
-
-                  const filtered = zones
-                    .filter((z) => z && z.toLowerCase().includes(tzSearch.trim().toLowerCase()))
-                    .sort((a, b) => a.localeCompare(b))
-
-                  const grouped = new Map<string, string[]>()
-                  for (const z of filtered) {
-                    const group = z.includes('/') ? z.split('/')[0] : 'Other'
-                    if (!grouped.has(group)) grouped.set(group, [])
-                    grouped.get(group)!.push(z)
-                  }
-
-                  const groupNames = Array.from(grouped.keys()).sort((a, b) => a.localeCompare(b))
-                  const currentTz = settings.timezone || resolved || 'UTC'
-
-                  return (
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                      <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">Search</label>
-                        <input
-                          type="text"
-                          value={tzSearch}
-                          onChange={(e) => setTzSearch(e.target.value)}
-                          placeholder="Type to filter (e.g. Moscow, Europe, UTC)"
-                          disabled={!isEditing}
-                          className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-gray-50"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">Selected</label>
-                        {isEditing ? (
-                          <select
-                            name="timezone"
-                            defaultValue={currentTz}
-                            className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
-                          >
-                            {groupNames.map((g) => (
-                              <optgroup key={g} label={g}>
-                                {grouped.get(g)!.map((z) => (
-                                  <option key={z} value={z}>{z}</option>
-                                ))}
-                              </optgroup>
-                            ))}
-                          </select>
-                        ) : (
-                          <div className="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-md text-gray-900">
-                            {currentTz}
-                          </div>
-                        )}
-                        <p className="text-xs text-gray-500 mt-1">
-                          Example: <span className="font-medium">Europe/Moscow</span>
-                        </p>
-                      </div>
-                    </div>
-                  )
-                })()}
+              <div className="flex flex-wrap gap-2 border-b border-gray-200 pb-3">
+                {(
+                  [
+                    ['general', 'General'],
+                    ['marketplace', 'Configure API'],
+                    ['smtp', 'SMTP'],
+                    ['orders', 'Orders & clients'],
+                  ] as const
+                ).map(([id, label]) => (
+                  <button
+                    key={id}
+                    type="button"
+                    onClick={() => setConfigTab(id)}
+                    className={`px-3 py-1.5 text-sm rounded-md ${
+                      configTab === id ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                    }`}
+                  >
+                    {label}
+                  </button>
+                ))}
               </div>
 
-              {/* Yandex Market API */}
-              <div>
-                <h3 className="text-md font-medium text-gray-900 mb-3">Yandex Market API</h3>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">
-                      API Token
-                    </label>
-                    {isEditing ? (
-                      <input
-                        type="text"
-                        name="yandex_api_token"
-                        placeholder="Your Yandex Market API Token"
-                        defaultValue={settings.yandex_api_token || ''}
-                        autoComplete="off"
-                        className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                      />
-                    ) : (
-                      <div className="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-md text-gray-900">
-                        {settings.yandex_api_token || <span className="text-gray-400">Not set</span>}
-                      </div>
-                    )}
-                  </div>
-                  
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">
-                      Business ID <span className="text-red-500">*</span>
-                    </label>
-                    {isEditing ? (
-                      <input
-                        type="text"
-                        name="yandex_business_id"
-                        defaultValue={settings.yandex_business_id || ''}
-                        autoComplete="off"
-                        className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                      />
-                    ) : (
-                      <div className="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-md text-gray-900">
-                        {settings.yandex_business_id || <span className="text-gray-400">Not set</span>}
-                      </div>
-                    )}
-                    <p className="text-xs text-gray-500 mt-1">Required for Business API</p>
-                  </div>
-                  
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">
-                      Campaign ID <span className="text-gray-400">(Legacy)</span>
-                    </label>
-                    {isEditing ? (
-                      <input
-                        type="text"
-                        name="yandex_campaign_id"
-                        defaultValue={settings.yandex_campaign_id || ''}
-                        autoComplete="off"
-                        className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                      />
-                    ) : (
-                      <div className="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-md text-gray-900">
-                        {settings.yandex_campaign_id || <span className="text-gray-400">Not set</span>}
-                      </div>
-                    )}
-                  </div>
+              {configTab === 'marketplace' && (
+                <div>
+                  <h3 className="text-md font-medium text-gray-900 mb-3">Marketplace APIs</h3>
+                  <MarketplaceConnectionsPanel />
                 </div>
-              </div>
+              )}
 
-              {/* SMTP Settings */}
+              {configTab === 'smtp' && (
               <div>
                 <h3 className="text-md font-medium text-gray-900 mb-3">SMTP Settings (Optional)</h3>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -450,9 +374,10 @@ export default function Settings() {
                   </div>
                 </div>
               </div>
+              )}
 
-              {/* Security */}
-              <div>
+              {configTab === 'smtp' && (
+              <div className="mt-6">
                 <h3 className="text-md font-medium text-gray-900 mb-3">Security</h3>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div className="md:col-span-2">
@@ -475,9 +400,28 @@ export default function Settings() {
                   </div>
                 </div>
               </div>
+              )}
 
-              {/* Email Message Settings - shown to buyers in activation emails */}
+              {configTab === 'general' && (
               <div>
+                <div className="mb-6 pb-6 border-b border-gray-200">
+                  <h3 className="text-md font-medium text-gray-900 mb-2">Store type</h3>
+                  <div className="flex items-center gap-2 text-sm text-gray-800">
+                    <input
+                      type="checkbox"
+                      checked={(currentStore?.store_types ?? []).includes('digital')}
+                      disabled={storeTypesMutation.isPending || !currentStore}
+                      onChange={(e) => {
+                        if (!currentStore) return
+                        const cur = new Set(currentStore.store_types ?? [])
+                        if (e.target.checked) cur.add('digital')
+                        else cur.delete('digital')
+                        storeTypesMutation.mutate([...cur])
+                      }}
+                    />
+                    Digital products (keys, subscriptions, downloads)
+                  </div>
+                </div>
                 <h3 className="text-md font-medium text-gray-900 mb-3">Настройки сообщений для покупателей</h3>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div>
@@ -584,7 +528,7 @@ export default function Settings() {
                       <textarea
                         name="working_hours_text"
                         rows={2}
-                        placeholder="Мы работаем ежедневно с 10:00 до 00:00 по московскому времени."
+                        placeholder="Мы работаем ежедневно с 10:00 до 23:00 по московскому времени."
                         defaultValue={settings.working_hours_text || ''}
                         className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
                       />
@@ -596,9 +540,10 @@ export default function Settings() {
                   </div>
                 </div>
               </div>
+              )}
 
-
-              {/* Order Activation Settings */}
+              {configTab === 'orders' && (
+              <>
               <div className="border-t pt-6">
                 <h3 className="text-lg font-medium text-gray-900 mb-4">Order Activation Settings</h3>
                 <p className="text-sm text-gray-600 mb-4">
@@ -607,7 +552,7 @@ export default function Settings() {
                 
                 <div className="space-y-4">
                   {isEditing ? (
-                    <label className="flex items-center">
+                    <div className="flex items-center">
                       <input
                         type="checkbox"
                         name="auto_activation_enabled"
@@ -615,7 +560,7 @@ export default function Settings() {
                         className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
                       />
                       <span className="ml-2 text-sm text-gray-700">Enable Automatic Activation</span>
-                    </label>
+                    </div>
                   ) : (
                     <div className="flex items-center">
                       <div className={`h-4 w-4 rounded border-2 flex items-center justify-center ${
@@ -647,7 +592,7 @@ export default function Settings() {
                 
                 <div className="space-y-4">
                   {isEditing ? (
-                    <label className="flex items-center">
+                    <div className="flex items-center">
                       <input
                         type="checkbox"
                         name="auto_append_clients"
@@ -655,7 +600,7 @@ export default function Settings() {
                         className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
                       />
                       <span className="ml-2 text-sm text-gray-700">Automatically Append Client Orders</span>
-                    </label>
+                    </div>
                   ) : (
                     <div className="flex items-center">
                       <div className={`h-4 w-4 rounded border-2 flex items-center justify-center ${
@@ -677,8 +622,10 @@ export default function Settings() {
                   </p>
                 </div>
               </div>
+              </>
+              )}
 
-              {isEditing && (
+              {isEditing && configTab !== 'marketplace' && (
                 <div className="flex justify-end space-x-3">
                   <button
                     type="button"

@@ -16,21 +16,30 @@ class ConfigurationError(Exception):
         super().__init__(self.message)
 
 
-def get_business_settings(business_id: int, db) -> Optional[models.AppSettings]:
-    """Get business settings for a given business_id"""
-    return db.query(models.AppSettings).filter(
-        models.AppSettings.business_id == business_id
-    ).first()
+def get_business_settings(
+    business_id: int, db, store_id: Optional[int] = None
+) -> Optional[models.AppSettings]:
+    """Get business settings for a given business_id (optionally per store)."""
+    query = db.query(models.AppSettings).filter(models.AppSettings.business_id == business_id)
+    if store_id:
+        return query.filter(models.AppSettings.store_id == store_id).first()
+    return query.order_by(models.AppSettings.id.asc()).first()
 
 
-def validate_yandex_config(business_id: int, db) -> models.AppSettings:
+def validate_yandex_config(
+    business_id: int, db, store_id: Optional[int] = None
+) -> models.AppSettings:
     """Validate that Yandex Market API configuration is set up for the business
     
     Raises:
         ConfigurationError: If configuration is missing
         HTTPException: If settings don't exist
     """
-    settings = get_business_settings(business_id, db)
+    settings = get_business_settings(business_id, db, store_id)
+    if settings and store_id:
+        from app.marketplace_service import overlay_yandex_on_settings
+
+        overlay_yandex_on_settings(settings, db, store_id)
     
     if not settings:
         raise HTTPException(
@@ -52,8 +61,11 @@ def validate_yandex_config(business_id: int, db) -> models.AppSettings:
     is_acma_token = settings.yandex_api_token and settings.yandex_api_token.startswith("ACMA:")
     
     if is_acma_token:
-        if not settings.yandex_campaign_id or not settings.yandex_campaign_id.strip():
+        has_campaign = bool(settings.yandex_campaign_id and settings.yandex_campaign_id.strip())
+        has_business = bool(settings.yandex_business_id and settings.yandex_business_id.strip())
+        if not has_campaign and not has_business:
             missing_fields.append("yandex_campaign_id")
+            missing_fields.append("yandex_business_id")
     else:
         if not settings.yandex_business_id or not settings.yandex_business_id.strip():
             missing_fields.append("yandex_business_id")
@@ -67,14 +79,16 @@ def validate_yandex_config(business_id: int, db) -> models.AppSettings:
     return settings
 
 
-def validate_smtp_config(business_id: int, db) -> models.AppSettings:
+def validate_smtp_config(
+    business_id: int, db, store_id: Optional[int] = None
+) -> models.AppSettings:
     """Validate that SMTP configuration is set up for the business
     
     Raises:
         ConfigurationError: If configuration is missing
         HTTPException: If settings don't exist
     """
-    settings = get_business_settings(business_id, db)
+    settings = get_business_settings(business_id, db, store_id)
     
     if not settings:
         raise HTTPException(

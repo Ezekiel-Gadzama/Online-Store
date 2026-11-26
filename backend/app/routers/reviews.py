@@ -5,6 +5,7 @@ from pydantic import BaseModel
 from app.database import get_db
 from app import models
 from app.auth import get_current_active_user, get_business_id
+from app.store_context import get_current_store
 from app.services.yandex_api import YandexMarketAPI
 from app.services.config_validator import ConfigurationError, format_config_error_response
 
@@ -20,12 +21,13 @@ def get_product_reviews(
     product_id: Optional[str] = None,
     limit: int = 50,
     current_user: models.User = Depends(get_current_active_user),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    store: models.MarketStore = Depends(get_current_store),
 ):
     """Get product reviews from Yandex Market with ratings"""
     try:
         business_id = get_business_id(current_user)
-        yandex_api = YandexMarketAPI(business_id=business_id, db=db)
+        yandex_api = YandexMarketAPI(business_id=business_id, db=db, store_id=store.id)
         reviews = yandex_api.get_product_reviews(product_id=product_id, limit=limit)
         
         # Calculate average rating if reviews exist
@@ -62,12 +64,13 @@ def _calculate_rating_breakdown(reviews: List[Dict]) -> Dict:
 def get_product_rating(
     product_id: str,
     current_user: models.User = Depends(get_current_active_user),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    store: models.MarketStore = Depends(get_current_store),
 ):
     """Get product rating summary"""
     try:
         business_id = get_business_id(current_user)
-        yandex_api = YandexMarketAPI(business_id=business_id, db=db)
+        yandex_api = YandexMarketAPI(business_id=business_id, db=db, store_id=store.id)
         reviews = yandex_api.get_product_reviews(product_id=product_id, limit=100)
         
         if not reviews:
@@ -99,12 +102,13 @@ def reply_to_product_review(
     review_id: str,
     reply: ReplyRequest,
     current_user: models.User = Depends(get_current_active_user),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    store: models.MarketStore = Depends(get_current_store),
 ):
     """Reply to a product review"""
     try:
         business_id = get_business_id(current_user)
-        yandex_api = YandexMarketAPI(business_id=business_id, db=db)
+        yandex_api = YandexMarketAPI(business_id=business_id, db=db, store_id=store.id)
         
         # Get review details before replying
         reviews = yandex_api.get_product_reviews(limit=100)
@@ -127,12 +131,13 @@ def reply_to_product_review(
 def get_shop_reviews(
     limit: int = 50,
     current_user: models.User = Depends(get_current_active_user),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    store: models.MarketStore = Depends(get_current_store),
 ):
     """Get shop reviews from Yandex Market with ratings"""
     try:
         business_id = get_business_id(current_user)
-        yandex_api = YandexMarketAPI(business_id=business_id, db=db)
+        yandex_api = YandexMarketAPI(business_id=business_id, db=db, store_id=store.id)
         reviews = yandex_api.get_shop_reviews(limit=limit)
         
         # Calculate average rating
@@ -158,12 +163,13 @@ def get_shop_reviews(
 @router.get("/shop/rating", response_model=Dict)
 def get_shop_rating(
     current_user: models.User = Depends(get_current_active_user),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    store: models.MarketStore = Depends(get_current_store),
 ):
     """Get shop rating summary"""
     try:
         business_id = get_business_id(current_user)
-        yandex_api = YandexMarketAPI(business_id=business_id, db=db)
+        yandex_api = YandexMarketAPI(business_id=business_id, db=db, store_id=store.id)
         reviews = yandex_api.get_shop_reviews(limit=100)
         
         if not reviews:
@@ -195,12 +201,13 @@ def reply_to_shop_review(
     review_id: str,
     reply: ReplyRequest,
     current_user: models.User = Depends(get_current_active_user),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    store: models.MarketStore = Depends(get_current_store),
 ):
     """Reply to a shop review"""
     try:
         business_id = get_business_id(current_user)
-        yandex_api = YandexMarketAPI(business_id=business_id, db=db)
+        yandex_api = YandexMarketAPI(business_id=business_id, db=db, store_id=store.id)
         
         # Get review details before replying
         reviews = yandex_api.get_shop_reviews(limit=100)

@@ -187,6 +187,10 @@ class Order(OrderBase):
     items_count: Optional[int] = None  # Number of products in this order
     delivery_type: Optional[str] = None  # "DIGITAL" or "DELIVERY" from Yandex API
     has_client: Optional[bool] = False  # Whether a client already exists for this order
+    marketplace: Optional[str] = None
+    assigned_to_user_id: Optional[int] = None
+    assigned_to_name: Optional[str] = None
+    has_chat: Optional[bool] = None
     created_at: datetime
     updated_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
@@ -381,6 +385,7 @@ class MarketingEmailTemplateUpdate(BaseModel):
 
 class MarketingEmailTemplate(MarketingEmailTemplateBase):
     id: int
+    store_id: Optional[int] = None
     attachments: Optional[List[Dict[str, Any]]] = []  # Unified attachments: [{"url": "...", "type": "image|video|file", "name": "..."}, ...]
     frequency_days: Optional[int] = None
     auto_broadcast_enabled: bool = False
@@ -512,12 +517,28 @@ class UserPermissions(BaseModel):
     view_marketing_emails: bool = False
     dashboard_right: bool = False  # Includes: view revenue, profit margin, top products charts, revenue/profit in top selling products
     view_product_prices: bool = True  # Default: True
+    create_store: bool = False
+    delete_store: bool = False
+
+
+class StoreMarketAccess(BaseModel):
+    all_stores: bool = False
+    stores: Dict[str, List[str]] = Field(default_factory=dict)
+
+
+class OwnerRestrictions(BaseModel):
+    permissions: Dict[str, bool] = Field(default_factory=dict)
+    store_market_access: bool = False
+    password_change: bool = False
 
 
 class StaffCreate(BaseModel):
     email: EmailStr
     name: Optional[str] = None  # Display name for staff (optional)
     password: Optional[str] = Field(None, min_length=8)  # Optional. If set, staff uses this to login or reset at /reset-password
+    store_market_access: Optional[StoreMarketAccess] = None
+    is_business_admin: bool = True
+    business_admin_all_stores: bool = False
 
     @field_validator("password", mode="before")
     @classmethod
@@ -538,6 +559,12 @@ class UserUpdate(BaseModel):
     is_active: Optional[bool] = None
     name: Optional[str] = None  # Display name for staff (optional)
     new_password: Optional[str] = Field(None, min_length=8)  # Admin can set staff password directly
+    store_market_access: Optional[StoreMarketAccess] = None
+    apply_permissions_to_all_stores: bool = False
+    permissions_store_id: Optional[int] = None
+    is_business_admin: Optional[bool] = None
+    business_admin_all_stores: Optional[bool] = None
+    owner_restrictions: Optional[OwnerRestrictions] = None
 
     @field_validator("new_password", mode="before")
     @classmethod
@@ -547,15 +574,28 @@ class UserUpdate(BaseModel):
         return v
 
 
+class UserProfileUpdate(BaseModel):
+    name: Optional[str] = None
+    timezone: Optional[str] = None
+    store_ui_preferences: Optional[Dict[str, Any]] = None
+
+
 class User(UserBase):
     id: int
     is_admin: bool
+    is_business_admin: bool = False
+    business_admin_all_stores: bool = True
+    owner_restrictions: Optional[OwnerRestrictions] = None
     created_by_id: Optional[int] = None
     permissions: UserPermissions
     is_active: bool
     name: Optional[str] = None  # Staff display name (optional)
     business_name: Optional[str] = None  # Business display name (admin's business or staff's business)
     business_username: Optional[str] = None  # Admin login identifier e.g. @Goal_sale
+    timezone: Optional[str] = None
+    store_market_access: Optional[Dict[str, Any]] = None
+    store_permissions: Optional[Dict[str, Any]] = None
+    store_ui_preferences: Optional[Dict[str, Any]] = None
     created_at: datetime
     updated_at: Optional[datetime] = None
 
@@ -563,10 +603,17 @@ class User(UserBase):
         from_attributes = True
 
 
+class StoreAccessOption(BaseModel):
+    store_id: int
+    store_name: str
+    marketplaces: List[Dict[str, str]]
+
+
 class BusinessAccountUpdate(BaseModel):
     """Update business admin email, password, business name, and/or business username. Used by staff with view_staff or admin."""
     new_email: Optional[EmailStr] = None
     new_password: Optional[str] = Field(None, min_length=8)
+    name: Optional[str] = None
     business_name: Optional[str] = None
     new_business_username: Optional[str] = None
 
@@ -591,6 +638,16 @@ class Token(BaseModel):
     user: User
 
 
-# Resolve forward refs (StaffCreateResponse, Token reference User defined above)
-StaffCreateResponse.model_rebuild()
-Token.model_rebuild()
+_types_ns = {
+    "Optional": Optional,
+    "List": List,
+    "Dict": Dict,
+    "Any": Any,
+    "User": User,
+    "UserPermissions": UserPermissions,
+    "StoreMarketAccess": StoreMarketAccess,
+}
+StaffCreate.model_rebuild(_types_namespace=_types_ns)
+UserUpdate.model_rebuild(_types_namespace=_types_ns)
+StaffCreateResponse.model_rebuild(_types_namespace=_types_ns)
+Token.model_rebuild(_types_namespace=_types_ns)

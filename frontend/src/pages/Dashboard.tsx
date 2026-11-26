@@ -515,7 +515,7 @@ export default function Dashboard() {
                   <CartesianGrid strokeDasharray="3 3" />
                   <XAxis dataKey="name" angle={-45} textAnchor="end" height={100} />
                   <YAxis />
-                  <Tooltip />
+                  <Tooltip wrapperStyle={{ zIndex: 30 }} />
                   <Bar dataKey="revenue" fill="#3b82f6" name="Revenue" />
                   <Bar dataKey="profit" fill="#10b981" name="Profit" />
                 </BarChart>

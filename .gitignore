@@ -45,3 +45,6 @@ Thumbs.db
 # Media files
 media/
 !media/.gitkeep
+
+# Local Telegram / channel exports (not part of the app)
+yandex market API channel/

@@ -433,7 +433,7 @@ export default function Clients() {
                         )
                       })
                       .map((product) => (
-                        <label key={product.id} className="flex items-center p-2 hover:bg-gray-50 cursor-pointer">
+                        <div key={product.id} className="flex items-center p-2 hover:bg-gray-50">
                           <input
                             type="checkbox"
                             checked={selectedProducts.includes(product.id)}
@@ -441,7 +441,7 @@ export default function Clients() {
                             className="mr-2"
                           />
                           <span className="text-sm">{product.name} (ID: {product.id})</span>
-                        </label>
+                        </div>
                       ))
                   )}
                 </div>
@@ -548,7 +548,7 @@ export default function Clients() {
                         )
                       })
                       .map((product) => (
-                        <label key={product.id} className="flex items-center p-2 hover:bg-gray-50 cursor-pointer">
+                        <div key={product.id} className="flex items-center p-2 hover:bg-gray-50">
                           <input
                             type="checkbox"
                             checked={selectedProducts.includes(product.id)}
@@ -556,7 +556,7 @@ export default function Clients() {
                             className="mr-2"
                           />
                           <span className="text-sm">{product.name} (ID: {product.id})</span>
-                        </label>
+                        </div>
                       ))
                   )}
                 </div>

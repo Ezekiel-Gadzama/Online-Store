@@ -297,10 +297,10 @@ export default function ResetPassword() {
                 />
               </div>
               <div className="flex items-center gap-2">
-                <label className="flex items-center gap-2 cursor-pointer">
+                <div className="flex items-center gap-2">
                   <input type="checkbox" checked={isOwnerReset} onChange={(e) => setIsOwnerReset(e.target.checked)} className="rounded border-gray-300" />
                   <span className="text-sm text-gray-700">Owner</span>
-                </label>
+                </div>
               </div>
               {!isOwnerReset && (
                 <div>
@@ -329,7 +329,7 @@ export default function ResetPassword() {
                   autoComplete="current-password"
                   required
                   className="appearance-none relative block w-full px-3 py-2 border border-gray-300 placeholder-gray-500 text-gray-900 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
-                  placeholder="Your current password (e.g. EasyPlay#111)"
+                  placeholder="Your current password"
                   value={prevPassword}
                   onChange={(e) => setPrevPassword(e.target.value)}
                 />

@@ -7,8 +7,25 @@ from app.database import get_db
 from app import models, schemas
 from app.auth import get_current_active_user, has_permission, get_business_id
 from app.cost_utils import get_product_cost_at_date
+from app.store_context import get_current_store
+from app.store_scope import (
+    StoreDataScope,
+    apply_order_marketplace_filter,
+    get_store_data_scope,
+    products_for_store,
+)
 
 router = APIRouter()
+
+
+def _orders_for_store(query, business_id: int, store_id: int, scope: StoreDataScope | None = None):
+    q = query.filter(
+        models.Order.business_id == business_id,
+        models.Order.store_id == store_id,
+    )
+    if scope:
+        q = apply_order_marketplace_filter(q, scope)
+    return q
 
 
 def _get_date_range(
@@ -53,14 +70,15 @@ def get_dashboard_stats(
     start_date: Optional[str] = Query(None, alias="start_date", description="Start date (ISO format) for custom range"),
     end_date: Optional[str] = Query(None, alias="end_date", description="End date (ISO format) for custom range"),
     current_user: models.User = Depends(get_current_active_user),
+    scope: StoreDataScope = Depends(get_store_data_scope),
     db: Session = Depends(get_db)
 ):
     """Get dashboard statistics with optional period filter or custom date range. Revenue/profit data requires dashboard_right permission."""
     business_id = get_business_id(current_user)
-    total_products = db.query(models.Product).filter(models.Product.business_id == business_id).count()
-    active_products = db.query(models.Product).filter(
-        models.Product.business_id == business_id,
-        models.Product.is_active == True
+    store_id = scope.store.id
+    total_products = products_for_store(db.query(models.Product), business_id, store_id).count()
+    active_products = products_for_store(db.query(models.Product), business_id, store_id).filter(
+        models.Product.is_active.is_(True)
     ).count()
     
     # Get date range for period filter or custom dates
@@ -68,7 +86,7 @@ def get_dashboard_stats(
     
     # Build order queries with period filter
     # Count unique orders by yandex_order_id (not individual order records)
-    base_query = db.query(models.Order).filter(models.Order.business_id == business_id)
+    base_query = _orders_for_store(db.query(models.Order), business_id, scope.store.id, scope)
     if start_date_dt:
         base_query = base_query.filter(models.Order.created_at >= start_date_dt)
     if end_date_dt:
@@ -162,6 +180,7 @@ def get_top_products(
     start_date: Optional[str] = Query(None, alias="start_date", description="Start date (ISO format) for custom range"),
     end_date: Optional[str] = Query(None, alias="end_date", description="End date (ISO format) for custom range"),
     current_user: models.User = Depends(get_current_active_user),
+    scope: StoreDataScope = Depends(get_store_data_scope),
     db: Session = Depends(get_db)
 ):
     """Get top selling products with optional period filter or custom date range. Revenue/profit uses cost at order date."""
@@ -169,13 +188,9 @@ def get_top_products(
     business_id = get_business_id(current_user)
     has_dashboard_right = current_user.is_admin or has_permission(current_user, "dashboard_right")
 
-    orders_query = (
-        db.query(models.Order)
-        .filter(
-            models.Order.business_id == business_id,
-            (models.Order.status == models.OrderStatus.COMPLETED) |
-            (models.Order.status == models.OrderStatus.FINISHED)
-        )
+    orders_query = _orders_for_store(db.query(models.Order), business_id, scope.store.id, scope).filter(
+        (models.Order.status == models.OrderStatus.COMPLETED)
+        | (models.Order.status == models.OrderStatus.FINISHED)
     )
     if start_date_dt:
         orders_query = orders_query.filter(models.Order.created_at >= start_date_dt)
@@ -231,6 +246,7 @@ def get_top_products(
 def get_recent_orders(
     limit: int = 10,
     current_user: models.User = Depends(get_current_active_user),
+    scope: StoreDataScope = Depends(get_store_data_scope),
     db: Session = Depends(get_db)
 ):
     """Get recent orders grouped by yandex_order_id (same logic as get_orders)"""
@@ -242,8 +258,7 @@ def get_recent_orders(
     # Use the same logic as get_orders endpoint to ensure consistency
     # Get more orders to account for grouping
     orders = (
-        db.query(models.Order)
-        .filter(models.Order.business_id == business_id)
+        _orders_for_store(db.query(models.Order), business_id, scope.store.id, scope)
         .order_by(desc(models.Order.created_at))
         .limit(limit * 10)  # Get more to account for grouping
         .all()
@@ -472,14 +487,21 @@ def get_dashboard_data(
     start_date: Optional[str] = Query(None, alias="start_date", description="Start date (ISO format) for custom range"),
     end_date: Optional[str] = Query(None, alias="end_date", description="End date (ISO format) for custom range"),
     current_user: models.User = Depends(get_current_active_user),
+    scope: StoreDataScope = Depends(get_store_data_scope),
     db: Session = Depends(get_db)
 ):
     """Get complete dashboard data with optional period filter or custom date range"""
     try:
         business_id = get_business_id(current_user)
-        stats = get_dashboard_stats(period=period, start_date=start_date, end_date=end_date, current_user=current_user, db=db)
-        top_products = get_top_products(limit=10, period=period, start_date=start_date, end_date=end_date, current_user=current_user, db=db)
-        recent_orders = get_recent_orders(limit=10, current_user=current_user, db=db)
+        stats = get_dashboard_stats(
+            period=period, start_date=start_date, end_date=end_date,
+            current_user=current_user, scope=scope, db=db,
+        )
+        top_products = get_top_products(
+            limit=10, period=period, start_date=start_date, end_date=end_date,
+            current_user=current_user, scope=scope, db=db,
+        )
+        recent_orders = get_recent_orders(limit=10, current_user=current_user, scope=scope, db=db)
         extra_costs = _get_extra_costs(business_id, period, start_date, end_date, db)
 
         return schemas.DashboardData(

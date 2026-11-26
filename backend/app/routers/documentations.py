@@ -8,6 +8,8 @@ from datetime import datetime
 from app.database import get_db
 from app import models, schemas
 from app.auth import get_current_active_user, get_business_id
+from app.store_context import get_current_store
+from app.store_scope import documentations_for_store
 from app.utils.export_utils import (
     extract_text_from_file,
     build_txt_documentation,
@@ -36,13 +38,14 @@ def get_documentations(
     limit: int = Query(15, ge=1, le=5000, description="Pagination page size (higher for dropdowns)"),
     search: Optional[str] = None,
     current_user: models.User = Depends(get_current_active_user),
+    store: models.MarketStore = Depends(get_current_store),
     db: Session = Depends(get_db)
 ):
-    """Get all documentations with optional search. Only returns documentations for the current user's business."""
+    """Get documentations for the current store."""
     from urllib.parse import quote, unquote
     
     business_id = get_business_id(current_user)
-    query = db.query(models.Documentation).filter(models.Documentation.business_id == business_id)
+    query = documentations_for_store(db.query(models.Documentation), business_id, store.id)
     if search:
         query = query.filter(models.Documentation.name.ilike(f"%{search}%"))
     
@@ -191,6 +194,7 @@ def export_documentation(
 def create_documentation(
     documentation: schemas.DocumentationCreate,
     current_user: models.User = Depends(get_current_active_user),
+    store: models.MarketStore = Depends(get_current_store),
     db: Session = Depends(get_db)
 ):
     """Create a new documentation"""
@@ -205,6 +209,7 @@ def create_documentation(
     business_id = get_business_id(current_user)
     doc_data = documentation.dict()
     doc_data['business_id'] = business_id
+    doc_data['store_id'] = store.id
     db_documentation = models.Documentation(**doc_data)
     db.add(db_documentation)
     db.commit()

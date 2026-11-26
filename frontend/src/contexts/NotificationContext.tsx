@@ -1,5 +1,7 @@
 import { createContext, useContext, useState, useEffect, ReactNode, useCallback } from 'react'
 import { useAuth } from './AuthContext'
+import { useStore } from './StoreContext'
+import { marketplaceConnectionsApi } from '../api/marketplaceConnections'
 import { settingsApi } from '../api/settings'
 import { getToken } from '../utils/authStorage'
 
@@ -25,161 +27,122 @@ interface NotificationContextType {
 
 const NotificationContext = createContext<NotificationContextType | undefined>(undefined)
 
+function storeHasAnyApiKey(
+  conns: Awaited<ReturnType<typeof marketplaceConnectionsApi.list>>,
+  settings: Awaited<ReturnType<typeof settingsApi.get>>,
+): boolean {
+  for (const c of conns) {
+    const token = (c.credentials?.api_token || '').trim()
+    if (token) return true
+  }
+  return !!(settings.yandex_api_token || '').trim()
+}
+
 export function NotificationProvider({ children }: { children: ReactNode }) {
   const { user } = useAuth()
+  const { currentStore } = useStore()
   const [notifications, setNotifications] = useState<Notification[]>([])
 
   const checkConfiguration = useCallback(async () => {
-    // Only check if this tab has an authenticated session
-    if (!user) return
-    if (!getToken()) return
+    if (!user || !getToken() || !currentStore) return
+
+    const storeId = currentStore.id
+    const storeName = currentStore.name
+    const storePrefix = `${storeName}: `
 
     try {
-      const settings = await settingsApi.get()
-      
-      // Check for missing Yandex API configuration
-      const missingYandexFields: string[] = []
-      if (!settings.yandex_api_token || !settings.yandex_api_token.trim()) {
-        missingYandexFields.push('Yandex API Token')
-      }
-      
-      const isAcmaToken = settings.yandex_api_token?.startsWith('ACMA:')
-      if (isAcmaToken) {
-        if (!settings.yandex_campaign_id || !settings.yandex_campaign_id.trim()) {
-          missingYandexFields.push('Yandex Campaign ID')
-        }
-      } else {
-        if (!settings.yandex_business_id || !settings.yandex_business_id.trim()) {
-          missingYandexFields.push('Yandex Business ID')
-        }
-      }
+      const [conns, settings] = await Promise.all([marketplaceConnectionsApi.list(), settingsApi.get()])
 
-      // Check for missing SMTP configuration
+      const needsApiKey = !storeHasAnyApiKey(conns, settings)
+
       const missingSmtpFields: string[] = []
       const smtpUser = settings.smtp_user || settings.from_email
-      if (!settings.smtp_host || !settings.smtp_host.trim()) {
-        missingSmtpFields.push('SMTP Host')
-      }
-      if (!smtpUser || !smtpUser.trim()) {
-        missingSmtpFields.push('SMTP User')
-      }
-      if (!settings.smtp_password || !settings.smtp_password.trim()) {
-        missingSmtpFields.push('SMTP Password')
-      }
-      if (!settings.from_email || !settings.from_email.trim()) {
-        missingSmtpFields.push('From Email')
-      }
+      if (!settings.smtp_host?.trim()) missingSmtpFields.push('SMTP Host')
+      if (!smtpUser?.trim()) missingSmtpFields.push('SMTP User')
+      if (!settings.smtp_password?.trim()) missingSmtpFields.push('SMTP Password')
+      if (!settings.from_email?.trim()) missingSmtpFields.push('From Email')
 
-      // Update notifications
-      setNotifications(prev => {
-        const newNotifications: Notification[] = []
-        const configNotificationIds = new Set(['config-yandex', 'config-smtp'])
+      setNotifications((prev) => {
+        const apiId = `config-marketplace-api-store-${storeId}`
+        const smtpId = `config-smtp-store-${storeId}`
+        const kept = prev.filter(
+          (n) =>
+            !n.id.startsWith('config-marketplace-api-store-') &&
+            !n.id.startsWith('config-yandex-store-') &&
+            !n.id.startsWith('config-smtp-store-'),
+        )
+        const next = [...kept]
 
-        // Yandex API configuration notification
-        if (missingYandexFields.length > 0) {
-          const id = 'config-yandex'
-          const existing = prev.find(n => n.id === id)
-          if (existing) {
-            // Keep existing notification (preserve read status)
-            newNotifications.push(existing)
-          } else {
-            // Create new notification
-            newNotifications.push({
-              id,
+        if (needsApiKey) {
+          const existing = prev.find((n) => n.id === apiId)
+          next.push(
+            existing ?? {
+              id: apiId,
               type: 'configuration',
-              title: 'Yandex Market API Configuration Required',
-              message: `Please configure the following Yandex Market API settings: ${missingYandexFields.join(', ')}`,
-              actionUrl: '/settings',
-              actionText: 'Go to Settings',
+              title: `${storePrefix}Marketplace API`,
+              message: 'Add API keys for this store under Settings → Configure API.',
+              actionUrl: '/settings?tab=marketplace',
+              actionText: 'Add API key',
               read: false,
-              createdAt: new Date()
-            })
-          }
+              createdAt: new Date(),
+            },
+          )
         }
 
-        // SMTP configuration notification
         if (missingSmtpFields.length > 0) {
-          const id = 'config-smtp'
-          const existing = prev.find(n => n.id === id)
-          if (existing) {
-            // Keep existing notification (preserve read status)
-            newNotifications.push(existing)
-          } else {
-            // Create new notification
-            newNotifications.push({
-              id,
+          const existing = prev.find((n) => n.id === smtpId)
+          next.push(
+            existing ?? {
+              id: smtpId,
               type: 'configuration',
-              title: 'SMTP Email Configuration Required',
-              message: `Please configure the following email settings: ${missingSmtpFields.join(', ')}`,
-              actionUrl: '/settings',
-              actionText: 'Go to Settings',
+              title: `${storePrefix}SMTP email setup`,
+              message: `Configure SMTP for this store. Missing: ${missingSmtpFields.join(', ')}`,
+              actionUrl: '/settings?tab=smtp',
+              actionText: 'Go to SMTP',
               read: false,
-              createdAt: new Date()
-            })
-          }
+              createdAt: new Date(),
+            },
+          )
         }
 
-        // Keep existing notifications that are not configuration-related or are still relevant
-        prev.forEach(notif => {
-          if (!configNotificationIds.has(notif.id)) {
-            // Keep non-config notifications
-            newNotifications.push(notif)
-          }
-          // Config notifications are already handled above
-        })
-
-        return newNotifications
+        return next
       })
-    } catch (error: any) {
-      // Silently fail - don't show errors for configuration checks
-      // 401 errors mean user is not authenticated, which is fine
-      if (error?.response?.status !== 401) {
+    } catch (error: unknown) {
+      const err = error as { response?: { status?: number } }
+      if (err?.response?.status !== 401) {
         console.error('Failed to check configuration:', error)
       }
     }
-  }, [user])
+  }, [user, currentStore])
 
-  // Check configuration every 5 seconds when user is logged in
   useEffect(() => {
-    if (!user) {
-      setNotifications([])
+    if (!user || !currentStore) {
+      setNotifications((prev) => prev.filter((n) => !n.id.startsWith('config-')))
       return
     }
 
-    // Initial check
     checkConfiguration()
-
-    // Set up interval to check every 5 seconds
-    const interval = setInterval(() => {
-      checkConfiguration()
-    }, 5000)
-
+    const interval = setInterval(checkConfiguration, 8000)
     return () => clearInterval(interval)
-  }, [user, checkConfiguration])
+  }, [user, currentStore, checkConfiguration])
 
   const markAsRead = useCallback((id: string) => {
-    setNotifications(prev =>
-      prev.map(notif =>
-        notif.id === id ? { ...notif, read: true } : notif
-      )
-    )
+    setNotifications((prev) => prev.map((notif) => (notif.id === id ? { ...notif, read: true } : notif)))
   }, [])
 
   const markAllAsRead = useCallback(() => {
-    setNotifications(prev =>
-      prev.map(notif => ({ ...notif, read: true }))
-    )
+    setNotifications((prev) => prev.map((notif) => ({ ...notif, read: true })))
   }, [])
 
   const clearNotification = useCallback((id: string) => {
-    setNotifications(prev => prev.filter(notif => notif.id !== id))
+    setNotifications((prev) => prev.filter((notif) => notif.id !== id))
   }, [])
 
   const clearAllNotifications = useCallback(() => {
     setNotifications([])
   }, [])
 
-  const unreadCount = notifications.filter(n => !n.read).length
+  const unreadCount = notifications.filter((n) => !n.read).length
 
   return (
     <NotificationContext.Provider

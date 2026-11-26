@@ -23,15 +23,11 @@ class OrderStatus(str, enum.Enum):
 
 class Product(Base):
     __tablename__ = "products"
-    __table_args__ = (
-        # Composite unique constraints: unique per business, not globally
-        UniqueConstraint('business_id', 'yandex_market_id', name='uq_product_business_yandex_id'),
-        UniqueConstraint('business_id', 'yandex_market_sku', name='uq_product_business_yandex_sku'),
-    )
     
     id = Column(Integer, primary_key=True, index=True)
     # Business isolation - links product to admin's business
     business_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    store_id = Column(Integer, ForeignKey("market_stores.id"), nullable=True, index=True)
     name = Column(String, nullable=False, index=True)
     description = Column(Text)
     product_type = Column(SQLEnum(ProductType), default=ProductType.DIGITAL, nullable=False)
@@ -134,6 +130,7 @@ class EmailTemplate(Base):
     id = Column(Integer, primary_key=True, index=True)
     # Business isolation - links template to admin's business
     business_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    store_id = Column(Integer, ForeignKey("market_stores.id"), nullable=True, index=True)
     name = Column(String, nullable=False)
     body = Column(Text, nullable=False)  # Plain text template body (with formatting stored as text)
     random_key = Column(Boolean, default=True)  # If True, activation key is auto-generated
@@ -167,13 +164,44 @@ class ActivationKey(Base):
     # To get order: db.query(Order).filter(Order.activation_key_id == self.id).first()
 
 
+class MarketStore(Base):
+    """Business store — marketplace credentials are added per store separately."""
+    __tablename__ = "market_stores"
+    __table_args__ = (
+        UniqueConstraint("owner_id", "name", name="uq_market_store_owner_name"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    owner_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    name = Column(String(120), nullable=False)
+    yandex_campaign_id = Column(String, nullable=True)
+    yandex_business_id = Column(String, nullable=True)
+    store_types = Column(JSONB, default=list)
+    delete_otp_hash = Column(String, nullable=True)
+    delete_otp_expires = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class StoreMarketplaceConnection(Base):
+    __tablename__ = "store_marketplace_connections"
+
+    id = Column(Integer, primary_key=True, index=True)
+    store_id = Column(Integer, ForeignKey("market_stores.id"), nullable=False, index=True)
+    marketplace = Column(String(32), nullable=False, index=True)
+    label = Column(String(120), nullable=True)
+    credentials = Column(JSONB, default=dict)
+    is_enabled = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+
 class AppSettings(Base):
-    """Application settings (one per business)"""
+    """Application settings (one row per store; legacy rows may lack store_id until migrated)"""
     __tablename__ = "app_settings"
     
     id = Column(Integer, primary_key=True, index=True)
-    # Business isolation - each business has its own settings
-    business_id = Column(Integer, ForeignKey("users.id"), nullable=False, unique=True, index=True)
+    business_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    store_id = Column(Integer, ForeignKey("market_stores.id"), nullable=True, unique=True, index=True)
     
     # Processing time
     processing_time_min = Column(Integer, default=20)  # Minimum processing time in minutes
@@ -231,6 +259,11 @@ class Order(Base):
     id = Column(Integer, primary_key=True, index=True)
     # Business isolation - links order to admin's business
     business_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    store_id = Column(Integer, ForeignKey("market_stores.id"), nullable=True, index=True)
+    marketplace = Column(String(32), nullable=True, index=True)
+    marketplace_connection_id = Column(
+        Integer, ForeignKey("store_marketplace_connections.id"), nullable=True, index=True
+    )
     yandex_order_id = Column(String, nullable=False, index=True)  # Removed unique=True - can have multiple orders per Yandex order
     product_id = Column(Integer, ForeignKey("products.id"), nullable=False)
     
@@ -334,6 +367,7 @@ class MarketingEmailTemplate(Base):
     id = Column(Integer, primary_key=True, index=True)
     # Business isolation - links template to admin's business
     business_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    store_id = Column(Integer, ForeignKey("market_stores.id"), nullable=True, index=True)
     name = Column(String, nullable=False)
     subject = Column(String, nullable=False)
     body = Column(Text, nullable=False)  # Rich text body with HTML formatting
@@ -352,6 +386,35 @@ class MarketingEmailTemplate(Base):
     # Metadata
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+
+class OrderAssignment(Base):
+    """Staff acceptance / ownership for a marketplace order (one row per store + yandex_order_id)."""
+    __tablename__ = "order_assignments"
+    __table_args__ = (UniqueConstraint("store_id", "yandex_order_id", name="uq_order_assignment_store_order"),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    business_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    store_id = Column(Integer, ForeignKey("market_stores.id"), nullable=False, index=True)
+    marketplace = Column(String(32), nullable=True, index=True)
+    yandex_order_id = Column(String, nullable=False, index=True)
+    assigned_to_user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    assigned_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+
+class ChatMessageSender(Base):
+    """Maps Yandex chat messageId to the staff user who sent it from the admin app."""
+    __tablename__ = "chat_message_senders"
+
+    id = Column(Integer, primary_key=True, index=True)
+    business_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    yandex_message_id = Column(String, nullable=False, index=True)
+    chat_id = Column(Integer, nullable=True, index=True)
+    order_id = Column(String, nullable=True, index=True)
+    sent_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
 class ChatReadStatus(Base):
@@ -397,6 +460,7 @@ class Documentation(Base):
     id = Column(Integer, primary_key=True, index=True)
     # Business isolation - links documentation to admin's business
     business_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    store_id = Column(Integer, ForeignKey("market_stores.id"), nullable=True, index=True)
     name = Column(String, nullable=False, index=True)
     description = Column(Text)  # Optional description
     
@@ -424,8 +488,13 @@ class User(Base):
     business_username = Column(String, nullable=True, index=True)  # Admin login identifier e.g. @Goal_sale (unique per admin)
     hashed_password = Column(String, nullable=False)
     
-    # User role: 'admin' or 'staff'
+    # User role: owner (is_admin) or staff
     is_admin = Column(Boolean, default=False, nullable=False)
+    # Staff tier: business-wide admin (all perms minus owner_restrictions)
+    is_business_admin = Column(Boolean, default=False, nullable=False)
+    business_admin_all_stores = Column(Boolean, default=False, nullable=False)
+    # Owner-only locks: denied features that no one else may grant
+    owner_restrictions = Column(JSONB, default=dict)
     
     # Foreign key to admin who created this staff account (null for admin)
     created_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
@@ -448,6 +517,15 @@ class User(Base):
     # Account status
     is_active = Column(Boolean, default=True, nullable=False)
     
+    # Display timezone for this user (IANA, e.g. Europe/Moscow)
+    timezone = Column(String, nullable=True)
+    # Staff: which stores and marketplace APIs they may use
+    store_market_access = Column(JSONB, default=dict)
+    # Staff: permission overrides per store id (string keys)
+    store_permissions = Column(JSONB, default=dict)
+    # Per-user UI: merge vs separate data per store
+    store_ui_preferences = Column(JSONB, default=dict)
+
     # Metadata
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())

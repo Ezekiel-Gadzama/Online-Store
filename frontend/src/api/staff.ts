@@ -1,10 +1,14 @@
 import apiClient from './client'
-import { User, UserPermissions } from './auth'
+import { User, UserPermissions, OwnerRestrictions } from './auth'
+import type { StoreMarketAccess } from '../utils/staffStoreAccess'
 
 export interface StaffCreate {
   email: string
   name?: string  // Optional display name for staff
   password?: string  // Optional. If set, staff uses this to login or reset at /reset-password
+  store_market_access?: StoreMarketAccess
+  is_business_admin?: boolean
+  business_admin_all_stores?: boolean
 }
 
 export interface StaffCreateResponse {
@@ -17,11 +21,18 @@ export interface UserUpdate {
   is_active?: boolean
   name?: string  // Display name for staff (optional)
   new_password?: string  // Admin can set staff password directly
+  store_market_access?: StoreMarketAccess
+  apply_permissions_to_all_stores?: boolean
+  permissions_store_id?: number | null
+  is_business_admin?: boolean
+  business_admin_all_stores?: boolean
+  owner_restrictions?: OwnerRestrictions
 }
 
 export interface BusinessAccountUpdate {
   new_email?: string
   new_password?: string
+  name?: string
   business_name?: string
   new_business_username?: string  // e.g. @Goal_sale
 }

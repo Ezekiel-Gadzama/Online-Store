@@ -1,5 +1,6 @@
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom'
 import { AuthProvider, useAuth } from './contexts/AuthContext'
+import { StoreProvider } from './contexts/StoreContext'
 import { ConfigurationErrorProvider } from './contexts/ConfigurationErrorContext'
 import { NotificationProvider } from './contexts/NotificationContext'
 import { TimeZoneProvider } from './contexts/TimeZoneContext'
@@ -19,6 +20,8 @@ import Signup from './pages/Signup'
 import ForgotPassword from './pages/ForgotPassword'
 import ResetPassword from './pages/ResetPassword'
 import Staff from './pages/Staff'
+import CreateFirstStore from './pages/CreateFirstStore'
+import { useStore } from './contexts/StoreContext'
 
 function ProtectedRoute({ children }: { children: React.ReactElement }) {
   const { user, isLoading } = useAuth()
@@ -33,6 +36,24 @@ function ProtectedRoute({ children }: { children: React.ReactElement }) {
 
   if (!user) {
     return <Navigate to="/login" replace />
+  }
+
+  return children
+}
+
+function RequireStore({ children }: { children: React.ReactElement }) {
+  const { stores, isLoading } = useStore()
+
+  if (isLoading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="text-gray-500">Loading...</div>
+      </div>
+    )
+  }
+
+  if (!stores.length) {
+    return <Navigate to="/setup-store" replace />
   }
 
   return children
@@ -56,12 +77,22 @@ function AppRoutes() {
       <Route path="/forgot-password" element={user ? <Navigate to="/dashboard" replace /> : <ForgotPassword />} />
       <Route path="/reset-password" element={<ResetPassword />} />
       <Route
+        path="/setup-store"
+        element={
+          <ProtectedRoute>
+            <CreateFirstStore />
+          </ProtectedRoute>
+        }
+      />
+      <Route
         path="/"
         element={
           <ProtectedRoute>
-            <Layout>
-              <Navigate to="/dashboard" replace />
-            </Layout>
+            <RequireStore>
+              <Layout>
+                <Navigate to="/dashboard" replace />
+              </Layout>
+            </RequireStore>
           </ProtectedRoute>
         }
       />
@@ -69,9 +100,11 @@ function AppRoutes() {
         path="/dashboard"
         element={
           <ProtectedRoute>
-            <Layout>
-              <Dashboard />
-            </Layout>
+            <RequireStore>
+              <Layout>
+                <Dashboard />
+              </Layout>
+            </RequireStore>
           </ProtectedRoute>
         }
       />
@@ -79,9 +112,11 @@ function AppRoutes() {
         path="/products"
         element={
           <ProtectedRoute>
-            <Layout>
-              <Products />
-            </Layout>
+            <RequireStore>
+              <Layout>
+                <Products />
+              </Layout>
+            </RequireStore>
           </ProtectedRoute>
         }
       />
@@ -89,9 +124,11 @@ function AppRoutes() {
         path="/orders"
         element={
           <ProtectedRoute>
-            <Layout>
-              <Orders />
-            </Layout>
+            <RequireStore>
+              <Layout>
+                <Orders />
+              </Layout>
+            </RequireStore>
           </ProtectedRoute>
         }
       />
@@ -99,9 +136,11 @@ function AppRoutes() {
         path="/activation-templates"
         element={
           <ProtectedRoute>
-            <Layout>
-              <ActivationTemplates />
-            </Layout>
+            <RequireStore>
+              <Layout>
+                <ActivationTemplates />
+              </Layout>
+            </RequireStore>
           </ProtectedRoute>
         }
       />
@@ -109,9 +148,11 @@ function AppRoutes() {
         path="/clients"
         element={
           <ProtectedRoute>
-            <Layout>
-              <Clients />
-            </Layout>
+            <RequireStore>
+              <Layout>
+                <Clients />
+              </Layout>
+            </RequireStore>
           </ProtectedRoute>
         }
       />
@@ -119,9 +160,11 @@ function AppRoutes() {
         path="/marketing-emails"
         element={
           <ProtectedRoute>
-            <Layout>
-              <MarketingEmails />
-            </Layout>
+            <RequireStore>
+              <Layout>
+                <MarketingEmails />
+              </Layout>
+            </RequireStore>
           </ProtectedRoute>
         }
       />
@@ -129,9 +172,11 @@ function AppRoutes() {
         path="/documentations"
         element={
           <ProtectedRoute>
-            <Layout>
-              <Documentations />
-            </Layout>
+            <RequireStore>
+              <Layout>
+                <Documentations />
+              </Layout>
+            </RequireStore>
           </ProtectedRoute>
         }
       />
@@ -139,9 +184,11 @@ function AppRoutes() {
         path="/reviews"
         element={
           <ProtectedRoute>
-            <Layout>
-              <Reviews />
-            </Layout>
+            <RequireStore>
+              <Layout>
+                <Reviews />
+              </Layout>
+            </RequireStore>
           </ProtectedRoute>
         }
       />
@@ -149,9 +196,11 @@ function AppRoutes() {
         path="/chats"
         element={
           <ProtectedRoute>
-            <Layout>
-              <Chats />
-            </Layout>
+            <RequireStore>
+              <Layout>
+                <Chats />
+              </Layout>
+            </RequireStore>
           </ProtectedRoute>
         }
       />
@@ -159,9 +208,11 @@ function AppRoutes() {
         path="/settings"
         element={
           <ProtectedRoute>
-            <Layout>
-              <Settings />
-            </Layout>
+            <RequireStore>
+              <Layout>
+                <Settings />
+              </Layout>
+            </RequireStore>
           </ProtectedRoute>
         }
       />
@@ -169,9 +220,11 @@ function AppRoutes() {
         path="/staff"
         element={
           <ProtectedRoute>
-            <Layout>
-              <Staff />
-            </Layout>
+            <RequireStore>
+              <Layout>
+                <Staff />
+              </Layout>
+            </RequireStore>
           </ProtectedRoute>
         }
       />
@@ -183,13 +236,15 @@ function App() {
   return (
     <Router>
       <AuthProvider>
-        <NotificationProvider>
-          <ConfigurationErrorProvider>
-            <TimeZoneProvider>
-              <AppRoutes />
-            </TimeZoneProvider>
-          </ConfigurationErrorProvider>
-        </NotificationProvider>
+        <StoreProvider>
+          <NotificationProvider>
+            <ConfigurationErrorProvider>
+              <TimeZoneProvider>
+                <AppRoutes />
+              </TimeZoneProvider>
+            </ConfigurationErrorProvider>
+          </NotificationProvider>
+        </StoreProvider>
       </AuthProvider>
     </Router>
   )

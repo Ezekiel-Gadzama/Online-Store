@@ -1,6 +1,6 @@
 # Docker Setup Guide
 
-This guide explains how to run the Yandex Market Manager using Docker.
+This guide explains how to run **Online Store** using Docker. Compose service names may still use the `yandex-market-*` prefix for compatibility with existing volumes and VPS paths.
 
 ## Prerequisites
 

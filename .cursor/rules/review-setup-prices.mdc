@@ -1,0 +1,56 @@
+---
+description: Review campaign — backup prices, lowest publishable price, error-fix loop, undo restore
+alwaysApply: false
+---
+
+# Review price setup (Yandex store)
+
+Trigger phrases: **setup for reviews**, **review setup**, **undo review setup**, **restore review prices**, **cheapest price for reviews**.
+
+## Do not guess store or offers
+
+1. Read **store** from user context (Store switcher / `STORE_ID` env) or ask which store.
+2. Parse optional filters from the user message:
+   - Explicit **offer list** (SKUs / `yandex_market_sku`).
+   - **No reviews only** (`--no-reviews-only`).
+   - **Less than N reviews** (`--max-reviews N`).
+   - If none → **all products** in that store.
+
+## Setup (`review_price_setup.py setup`)
+
+Run on the **backend container** (VPS: `docker compose … exec -T backend python scripts/review_price_setup.py …`).
+
+**Order (required):**
+
+1. **Select offers** per filters (DB + Yandex review counts).
+2. **Backup first** — script writes `media/review_price_backups/store_{id}_{timestamp}.json` and updates `store_{id}_latest.json`. Never change Yandex prices before backup exists. Backup includes per-offer **`product_activation`**: `email_template_id` and unused key count.
+3. **Activation prep** (after backup, before price changes): products **without** a template get the default (`REVIEW_ACTIVATION_TEMPLATE_ID` or **Стандартный шаблон активации (digital)**). Products **with no unused activation keys** get one placeholder key (`REVIEW_DEFAULT_ACTIVATION_KEY`, default `REVIEW-DEFAULT-KEY`). Products that already had a template are **not** changed. IDs of assigned templates / created keys are stored in `activation_setup` on the same backup file.
+4. **Unhide** hidden SKUs in the target set only.
+5. **Set lowest price** — default steps `5` then `10` RUR (`REVIEW_PRICE_STEPS`). Digital KateSkate: **5 RUR often → `DISABLED_AUTOMATICALLY`**; loop may raise to **10 RUR** to publish (learned behavior).
+6. **Confirm price quarantine** (business + campaign).
+7. **Stock 1000** (`STOCK_COUNT`, warehouse `YANDEX_WAREHOUSE_ID` default `2528107`).
+8. **Wait 1 minute**, re-check campaign offer status (`PUBLISHED` / `READY` vs errors).
+9. **Fix** disabled: quarantine confirm, stock, bump price along steps if still `DISABLED_AUTOMATICALLY`.
+10. **Repeat** wait + check + fix until **no offer** in the set is non-published or `--max-rounds` (default 8).
+
+## Undo (`review_price_setup.py undo`)
+
+- Restore from **latest** `store_{id}_latest.json` unless user gives `--snapshot`.
+- Confirm quarantine after restore; sync local `products.selling_price`.
+- **Activation undo**: products that were given a template only for review → `email_template_id` back to `null` (from backup). Products that already had a template → **unchanged**. Remove **unused** placeholder keys created during setup; leave used keys.
+
+## Status
+
+`python scripts/review_price_setup.py status --store-id …` — backup path + status histogram.
+
+## Code references
+
+- Library: `backend/scripts/review_price_lib.py`
+- CLI: `backend/scripts/review_price_setup.py`
+- Older one-offs: `reveal_hidden_offers_5rub.py`, `restore_hidden_offer_prices.py`, `republish_disabled_offers.py` (superseded by the review scripts for new work)
+
+## Agent checklist after setup
+
+- Print **backup file path** and **undo command**.
+- Report final **price per offer** if not uniform after the fix loop.
+- Warn user: prices are for **friends/test purchases**; undo when review push is done.

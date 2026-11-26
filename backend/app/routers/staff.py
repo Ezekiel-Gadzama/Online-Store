@@ -1,18 +1,77 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
 from typing import List
 from datetime import datetime, timedelta, timezone
 from app.database import get_db
 from app import models, schemas
 from app.auth import (
-    get_current_active_user, require_admin, has_permission,
+    get_current_active_user, require_admin,
     create_password_reset_token, get_password_hash, get_business_id
 )
 from app.services.email_service import EmailService
 from app.services.config_validator import ConfigurationError, format_config_error_response
 from app.config import settings
+from app.staff_roles import (
+    apply_permission_locks,
+    assert_can_change_permissions,
+    assert_actor_can_grant_permissions,
+    assert_no_locked_permission_grants,
+    assert_store_market_access_grant,
+    can_manage_staff_rights,
+    can_view_staff_page,
+    is_business_admin,
+    is_owner,
+    normalize_owner_restrictions,
+    section_owner_locked,
+    business_admin_covers_store,
+)
 
 router = APIRouter()
+
+
+def _staff_member_schema(user: models.User) -> schemas.User:
+    permissions = (
+        schemas.UserPermissions(**user.permissions) if user.permissions else schemas.UserPermissions()
+    )
+    locks = normalize_owner_restrictions(getattr(user, "owner_restrictions", None))
+    return schemas.User(
+        id=user.id,
+        email=user.email,
+        name=user.name,
+        is_admin=user.is_admin,
+        is_business_admin=bool(getattr(user, "is_business_admin", False)),
+        business_admin_all_stores=bool(getattr(user, "business_admin_all_stores", True)),
+        owner_restrictions=schemas.OwnerRestrictions(**locks),
+        created_by_id=user.created_by_id,
+        permissions=permissions,
+        is_active=user.is_active,
+        store_market_access=user.store_market_access,
+        store_permissions=user.store_permissions if isinstance(user.store_permissions, dict) else {},
+        created_at=user.created_at,
+        updated_at=user.updated_at,
+    )
+
+
+@router.get("/store-access-options")
+def store_access_options(
+    current_user: models.User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    if not can_view_staff_page(current_user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Permission required: view_staff",
+        )
+    from app.store_context import get_owner_stores
+    from app.marketplace_service import MARKETPLACE_CHOICES
+
+    owner_id = get_business_id(current_user)
+    stores = get_owner_stores(db, owner_id)
+    return {
+        "stores": [{"id": s.id, "name": s.name} for s in stores],
+        "marketplaces": sorted(MARKETPLACE_CHOICES),
+    }
 
 
 @router.get("/", response_model=List[schemas.User])
@@ -20,44 +79,20 @@ def get_staff(
     current_user: models.User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
-    """Get all staff accounts. Only admin or users with view_staff permission can access."""
-    # Check permission
-    if not current_user.is_admin and not has_permission(current_user, "view_staff"):
+    """Get all staff accounts. Owner, business admin, or view_staff may access."""
+    if not can_view_staff_page(current_user):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Permission required: view_staff"
         )
-    
+
     business_id = get_business_id(current_user)
-    if current_user.is_admin:
-        staff = db.query(models.User).filter(
-            models.User.is_admin == False,
-            models.User.created_by_id == business_id
-        ).all()
-    else:
-        # Staff can only see staff created by their admin
-        staff = db.query(models.User).filter(
-            models.User.is_admin == False,
-            models.User.created_by_id == current_user.created_by_id
-        ).all()
-    
-    # Convert to response format
-    result = []
-    for user in staff:
-        permissions = schemas.UserPermissions(**user.permissions) if user.permissions else schemas.UserPermissions()
-        result.append(schemas.User(
-            id=user.id,
-            email=user.email,
-            name=user.name,
-            is_admin=user.is_admin,
-            created_by_id=user.created_by_id,
-            permissions=permissions,
-            is_active=user.is_active,
-            created_at=user.created_at,
-            updated_at=user.updated_at
-        ))
-    
-    return result
+    staff = db.query(models.User).filter(
+        models.User.is_admin == False,
+        models.User.created_by_id == business_id,
+    ).all()
+
+    return [_staff_member_schema(user) for user in staff]
 
 
 @router.get("/business-account", response_model=schemas.User)
@@ -65,11 +100,11 @@ def get_business_account(
     current_user: models.User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
-    """Get the business admin account. Access: admin or users with view_staff permission."""
-    if not current_user.is_admin and not has_permission(current_user, "view_staff"):
+    """Get the business owner account (owner only — used to edit business account)."""
+    if not is_owner(current_user):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Permission required: view_staff"
+            detail="Only the business owner may view or edit the business account",
         )
     business_id = get_business_id(current_user)
     admin_user = db.query(models.User).filter(
@@ -86,6 +121,7 @@ def get_business_account(
         created_by_id=admin_user.created_by_id,
         permissions=permissions,
         is_active=admin_user.is_active,
+        name=admin_user.name,
         business_name=admin_user.business_name,
         business_username=admin_user.business_username,
         created_at=admin_user.created_at,
@@ -99,11 +135,11 @@ def update_business_account(
     current_user: models.User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
-    """Update business admin email, password, and/or business name. Uses business_id (not email). Access: admin or users with view_staff."""
-    if not current_user.is_admin and not has_permission(current_user, "view_staff"):
+    """Update business owner account. Owner only."""
+    if not is_owner(current_user):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Permission required: view_staff"
+            detail="Only the business owner may update the business account",
         )
     business_id = get_business_id(current_user)
     admin_user = db.query(models.User).filter(
@@ -125,6 +161,8 @@ def update_business_account(
         admin_user.hashed_password = get_password_hash(data.new_password)
         admin_user.password_reset_token = None
         admin_user.password_reset_token_expires = None
+    if data.name is not None:
+        admin_user.name = data.name.strip() or None
     if data.business_name is not None:
         admin_user.business_name = data.business_name.strip() or None
     admin_user.updated_at = datetime.now(timezone.utc)
@@ -138,6 +176,7 @@ def update_business_account(
         created_by_id=admin_user.created_by_id,
         permissions=permissions,
         is_active=admin_user.is_active,
+        name=admin_user.name,
         business_name=admin_user.business_name,
         business_username=admin_user.business_username,
         created_at=admin_user.created_at,
@@ -151,12 +190,11 @@ def create_staff(
     current_user: models.User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
-    """Create a new staff account. Only admin or users with view_staff permission can create staff."""
-    # Check permission
-    if not current_user.is_admin and not has_permission(current_user, "view_staff"):
+    """Create staff. Owner or business admin only."""
+    if not can_manage_staff_rights(current_user):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Permission required: view_staff"
+            detail="Only the owner or a business admin may create staff",
         )
     
     created_by_id = current_user.id if current_user.is_admin else current_user.created_by_id
@@ -173,27 +211,42 @@ def create_staff(
     # Determine created_by_id
     created_by_id = current_user.id if current_user.is_admin else current_user.created_by_id
     
-    # Set default permissions (all False except view_product_prices which is True)
-    default_permissions = {
-        "view_staff": False,
-        "view_settings": False,
-        "client_right": False,
-        "view_marketing_emails": False,
-        "dashboard_right": False,
-        "view_product_prices": True  # Default: True
-    }
+    from app.staff_defaults import new_staff_fields
+    from secrets import token_urlsafe
 
-    # If password provided, use it; otherwise empty (will send reset link via email)
-    hashed_password = get_password_hash(staff_data.password) if staff_data.password else ""
-    
+    if staff_data.password:
+        hashed_password = get_password_hash(staff_data.password)
+    else:
+        hashed_password = get_password_hash(token_urlsafe(32))
+
+    if is_owner(current_user):
+        is_ba = staff_data.is_business_admin
+        ba_all_stores = staff_data.business_admin_all_stores if is_ba else False
+    else:
+        is_ba = False
+        ba_all_stores = False
+
+    staff_defaults = new_staff_fields(
+        db,
+        created_by_id,
+        is_business_admin=is_ba,
+        business_admin_all_stores=ba_all_stores,
+    )
+    if staff_data.store_market_access is not None:
+        staff_defaults["store_market_access"] = staff_data.store_market_access.model_dump()
+
     db_user = models.User(
         email=staff_data.email,
         name=(staff_data.name or "").strip() or None,
         hashed_password=hashed_password,
         is_admin=False,
+        is_business_admin=staff_defaults["is_business_admin"],
+        business_admin_all_stores=staff_defaults["business_admin_all_stores"],
+        owner_restrictions={},
         created_by_id=created_by_id,
-        permissions=default_permissions,
-        is_active=True
+        permissions=staff_defaults["permissions"],
+        store_market_access=staff_defaults["store_market_access"],
+        is_active=True,
     )
     
     db.add(db_user)
@@ -212,7 +265,7 @@ def create_staff(
             email_service = EmailService(business_id=business_id, db=db)
             reset_url = f"{settings.FRONTEND_URL}/reset-password?token={reset_token}"
             email_body = f"""
-            You have been invited to join the Yandex Market management system.
+            You have been invited to join Online Store.
 
             Click the following link to set your password and activate your account:
             {reset_url}
@@ -223,7 +276,7 @@ def create_staff(
             """
             result = email_service.send_email(
                 to_email=db_user.email,
-                subject="Welcome to Yandex Market - Set Your Password",
+                subject="Welcome to Online Store - Set Your Password",
                 body=email_body
             )
             if result.get("success"):
@@ -239,20 +292,10 @@ def create_staff(
     db.commit()
     db.refresh(db_user)
 
-    permissions = schemas.UserPermissions(**db_user.permissions) if db_user.permissions else schemas.UserPermissions()
-    response_user = schemas.User(
-        id=db_user.id,
-        email=db_user.email,
-        name=db_user.name,
-        is_admin=db_user.is_admin,
-        created_by_id=db_user.created_by_id,
-        permissions=permissions,
-        is_active=db_user.is_active,
-        created_at=db_user.created_at,
-        updated_at=db_user.updated_at
+    return schemas.StaffCreateResponse(
+        user=_staff_member_schema(db_user),
+        invitation_email_sent=invitation_email_sent,
     )
-
-    return schemas.StaffCreateResponse(user=response_user, invitation_email_sent=invitation_email_sent)
 
 
 @router.put("/{staff_id}", response_model=schemas.User)
@@ -262,79 +305,145 @@ def update_staff(
     current_user: models.User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
-    """Update staff account permissions. Only admin or users with view_staff permission can update."""
-    # Check permission
-    if not current_user.is_admin and not has_permission(current_user, "view_staff"):
+    """Update staff. Permission changes: owner or business admin. Owner-only locks and admin role."""
+    if not can_view_staff_page(current_user):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Permission required: view_staff"
+            detail="Permission required: view_staff",
         )
-    
-    # Find staff user
+
     staff_user = db.query(models.User).filter(models.User.id == staff_id).first()
     if not staff_user:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Staff user not found"
+            detail="Staff user not found",
         )
-    
-    # Check if user is trying to update an admin (not allowed)
+
     if staff_user.is_admin:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Cannot update admin accounts"
+            detail="Cannot update owner accounts",
         )
-    
-    # Check if current user has permission to update this staff member
-    if not current_user.is_admin:
-        # Staff can only update staff created by their admin
-        if staff_user.created_by_id != current_user.created_by_id:
+
+    business_id = get_business_id(current_user)
+    if staff_user.created_by_id != business_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Staff member does not belong to this business",
+        )
+
+    editing_self = current_user.id == staff_user.id
+
+    if staff_update.owner_restrictions is not None:
+        if not is_owner(current_user):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="You can only update staff created by your admin"
+                detail="Only the owner may set owner restrictions",
             )
-    
-    # Update permissions if provided
+        staff_user.owner_restrictions = normalize_owner_restrictions(
+            staff_update.owner_restrictions.model_dump()
+        )
+        flag_modified(staff_user, "owner_restrictions")
+
+    if staff_update.is_business_admin is not None or staff_update.business_admin_all_stores is not None:
+        if not is_owner(current_user):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Only the owner may change the business admin role",
+            )
+        if staff_update.is_business_admin is not None:
+            staff_user.is_business_admin = staff_update.is_business_admin
+        if staff_update.business_admin_all_stores is not None:
+            staff_user.business_admin_all_stores = staff_update.business_admin_all_stores
+
     if staff_update.permissions is not None:
-        # Convert permissions to dict
-        permissions_dict = staff_update.permissions.dict()
-        # Merge with existing permissions (preserve defaults)
-        if staff_user.permissions:
-            staff_user.permissions.update(permissions_dict)
+        assert_can_change_permissions(current_user, staff_user)
+        if not staff_update.apply_permissions_to_all_stores:
+            sid = staff_update.permissions_store_id
+            if (
+                not is_owner(current_user)
+                and is_business_admin(current_user)
+                and sid is not None
+                and not business_admin_covers_store(current_user, sid)
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="You may not set permissions for stores outside your admin scope",
+                )
+        raw_perm = staff_update.permissions.model_dump()
+        perm_store_id = None if staff_update.apply_permissions_to_all_stores else staff_update.permissions_store_id
+        assert_actor_can_grant_permissions(current_user, raw_perm, perm_store_id)
+        perm = apply_permission_locks(staff_user, raw_perm)
+        assert_no_locked_permission_grants(staff_user, raw_perm)
+        if staff_update.apply_permissions_to_all_stores:
+            staff_user.permissions = perm
+            staff_user.store_permissions = {}
+            flag_modified(staff_user, "permissions")
+            flag_modified(staff_user, "store_permissions")
         else:
-            staff_user.permissions = permissions_dict
-    
-    # Update is_active if provided
+            sid = staff_update.permissions_store_id
+            if sid is None:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="permissions_store_id is required when not applying to all stores",
+                )
+            by_store = dict(staff_user.store_permissions or {})
+            by_store[str(sid)] = perm
+            staff_user.store_permissions = by_store
+            flag_modified(staff_user, "store_permissions")
+
+    rights_manager = can_manage_staff_rights(current_user)
+
     if staff_update.is_active is not None:
+        if not rights_manager and not editing_self:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cannot change active status")
+        if editing_self and not is_owner(current_user):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cannot change your own active status")
         staff_user.is_active = staff_update.is_active
 
-    # Update password if provided (admin can set staff password directly)
     if staff_update.new_password:
+        if section_owner_locked(staff_user, "password_change") and not is_owner(current_user):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Password changes are owner-restricted for this staff member",
+            )
+        if editing_self and not is_owner(current_user):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Use profile settings to change your own password",
+            )
+        if not is_owner(current_user) and not rights_manager:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cannot set password")
         staff_user.hashed_password = get_password_hash(staff_update.new_password)
         staff_user.password_reset_token = None
         staff_user.password_reset_token_expires = None
 
-    # Update name if provided
     if staff_update.name is not None:
         staff_user.name = (staff_update.name or "").strip() or None
-    
+
+    if staff_update.store_market_access is not None:
+        if section_owner_locked(staff_user, "store_market_access") and not is_owner(current_user):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Store access is owner-restricted for this staff member",
+            )
+        if editing_self and not is_owner(current_user):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You cannot change your own store and marketplace access",
+            )
+        if not is_owner(current_user) and not rights_manager:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cannot change store access")
+        proposed_access = staff_update.store_market_access.model_dump()
+        assert_store_market_access_grant(current_user, proposed_access)
+        staff_user.store_market_access = proposed_access
+        flag_modified(staff_user, "store_market_access")
+
     staff_user.updated_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(staff_user)
-    
-    # Convert to response format
-    permissions = schemas.UserPermissions(**staff_user.permissions) if staff_user.permissions else schemas.UserPermissions()
-    return schemas.User(
-        id=staff_user.id,
-        email=staff_user.email,
-        name=staff_user.name,
-        is_admin=staff_user.is_admin,
-        created_by_id=staff_user.created_by_id,
-        permissions=permissions,
-        is_active=staff_user.is_active,
-        created_at=staff_user.created_at,
-        updated_at=staff_user.updated_at
-    )
+
+    return _staff_member_schema(staff_user)
 
 
 @router.delete("/{staff_id}")

@@ -1,11 +1,14 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Body
 from sqlalchemy.orm import Session
 from typing import List, Dict, Optional
-from sqlalchemy import func, desc
+from sqlalchemy import case, func, desc
+from pydantic import BaseModel
 from app.database import get_db
 from app import models, schemas
 from app.services.order_service import OrderService
 from app.auth import get_current_active_user, get_business_id
+from app.store_context import get_current_store
+from app.store_scope import StoreDataScope, apply_order_marketplace_filter, get_store_data_scope
 
 router = APIRouter()
 
@@ -19,7 +22,9 @@ def get_orders(
     start_date: str = None,
     end_date: str = None,
     refresh_status: bool = True,  # Optionally refresh order status from Yandex
+    assigned_to: Optional[str] = None,
     current_user: models.User = Depends(get_current_active_user),
+    scope: StoreDataScope = Depends(get_store_data_scope),
     db: Session = Depends(get_db)
 ):
     """Get all orders with optional filters. Only returns orders for the current user's business.
@@ -33,8 +38,15 @@ def get_orders(
     from app.services.yandex_api import YandexMarketAPI
     from app.config import settings
     
+    store = scope.store
     business_id = get_business_id(current_user)
-    query = db.query(models.Order).filter(models.Order.business_id == business_id)
+    query = apply_order_marketplace_filter(
+        db.query(models.Order).filter(
+            models.Order.business_id == business_id,
+            models.Order.store_id == store.id,
+        ),
+        scope,
+    )
     delivery_type = models.Order.yandex_order_data["delivery"]["type"].astext
 
     if is_digital is True:
@@ -72,10 +84,16 @@ def get_orders(
     
     # Pagination is based on distinct yandex_order_id groups (not raw rows).
     # Step 1: fetch page of order group IDs.
-    group_query = db.query(
-        models.Order.yandex_order_id.label("yandex_order_id"),
-        func.max(models.Order.created_at).label("max_created_at"),
-    ).filter(models.Order.business_id == business_id)
+    group_query = apply_order_marketplace_filter(
+        db.query(
+            models.Order.yandex_order_id.label("yandex_order_id"),
+            func.max(models.Order.created_at).label("max_created_at"),
+        ).filter(
+            models.Order.business_id == business_id,
+            models.Order.store_id == store.id,
+        ),
+        scope,
+    )
 
     if is_digital is True:
         group_query = group_query.filter(delivery_type == "DIGITAL")
@@ -106,18 +124,68 @@ def get_orders(
         except Exception:
             pass
 
+    finished_rank = func.min(
+        case((models.Order.status == models.OrderStatus.FINISHED, 1), else_=0)
+    )
+    group_order = [desc("max_created_at")]
+    if not status or status.lower() == "unfinished":
+        group_order = [finished_rank.asc(), desc("max_created_at")]
+
     group_rows = (
         group_query
         .group_by(models.Order.yandex_order_id)
-        .order_by(desc("max_created_at"))
+        .order_by(*group_order)
         .offset(skip)
         .limit(limit)
         .all()
     )
     yandex_ids_page = [r[0] for r in group_rows if r and r[0]]
 
+    if assigned_to:
+        from app.order_assignment import assignments_for_orders
+
+        if assigned_to.strip().lower() == "unassigned":
+            assigned_ids = set(
+                a.yandex_order_id
+                for a in db.query(models.OrderAssignment)
+                .filter(models.OrderAssignment.store_id == store.id)
+                .all()
+            )
+            yandex_ids_page = [yid for yid in yandex_ids_page if yid not in assigned_ids]
+        elif assigned_to.strip().lower() == "me":
+            mine = {
+                a.yandex_order_id
+                for a in db.query(models.OrderAssignment).filter(
+                    models.OrderAssignment.store_id == store.id,
+                    models.OrderAssignment.assigned_to_user_id == current_user.id,
+                )
+            }
+            yandex_ids_page = [yid for yid in yandex_ids_page if yid in mine]
+        else:
+            try:
+                uid = int(assigned_to)
+                theirs = {
+                    a.yandex_order_id
+                    for a in db.query(models.OrderAssignment).filter(
+                        models.OrderAssignment.store_id == store.id,
+                        models.OrderAssignment.assigned_to_user_id == uid,
+                    )
+                }
+                yandex_ids_page = [yid for yid in yandex_ids_page if yid in theirs]
+            except ValueError:
+                pass
+
     if not yandex_ids_page:
         return []
+
+    from app.order_assignment import assignments_for_orders
+
+    assign_map = assignments_for_orders(db, store.id, yandex_ids_page)
+    assignee_ids = {a.assigned_to_user_id for a in assign_map.values()}
+    user_labels: Dict[int, str] = {}
+    if assignee_ids:
+        for u in db.query(models.User).filter(models.User.id.in_(assignee_ids)).all():
+            user_labels[u.id] = ((u.name or "").strip() or u.email or f"User {u.id}").strip()
 
     # Step 2: fetch all rows for those group IDs.
     orders = (
@@ -131,7 +199,7 @@ def get_orders(
     if refresh_status:
         try:
             from app.services.config_validator import ConfigurationError, format_config_error_response
-            yandex_api = YandexMarketAPI(business_id=business_id, db=db)
+            yandex_api = YandexMarketAPI(business_id=business_id, db=db, store_id=store.id)
             unique_yandex_order_ids = set()
             orders_to_refresh = []
             
@@ -215,18 +283,13 @@ def get_orders(
             orders_by_yandex_id[yandex_id] = []
         orders_by_yandex_id[yandex_id].append(order)
     
-    # Build result: one entry per yandex_order_id with all items
+    # Build result: one entry per yandex_order_id with all items (preserve page sort)
     result = []
-    seen_yandex_ids = set()
-    
-    for order in orders:
-        yandex_id = order.yandex_order_id
-        if yandex_id in seen_yandex_ids:
+
+    for yandex_id in yandex_ids_page:
+        order_group = orders_by_yandex_id.get(yandex_id)
+        if not order_group:
             continue
-        seen_yandex_ids.add(yandex_id)
-        
-        # Get all orders with this yandex_order_id
-        order_group = orders_by_yandex_id[yandex_id]
         
         # Use the first order as the base (they share customer info, dates, etc.)
         # IMPORTANT: Refresh from database to ensure we have the latest status (especially FINISHED)
@@ -429,6 +492,9 @@ def get_orders(
         # IMPORTANT: Always use the actual status from database - FINISHED status takes precedence over Yandex API
         # Refresh base_order one more time to ensure we have the absolute latest status from database
         db.refresh(base_order)
+        assignment = assign_map.get(yandex_id)
+        assigned_to_user_id = assignment.assigned_to_user_id if assignment else None
+        assigned_to_name = user_labels.get(assigned_to_user_id) if assigned_to_user_id else None
         order_dict = {
             **base_order.__dict__,
             "product_name": order_items[0]["product_name"] if order_items else None,  # First product for display
@@ -439,6 +505,9 @@ def get_orders(
             "delivery_type": delivery_type,  # "DIGITAL" or "DELIVERY"
             "status": base_order.status,  # CRITICAL: Use actual database status (FINISHED takes precedence over everything)
             "has_client": has_client,  # Whether a client already exists for this order
+            "marketplace": base_order.marketplace or "yandex",
+            "assigned_to_user_id": assigned_to_user_id,
+            "assigned_to_name": assigned_to_name,
         }
         
         # Convert to Order schema to ensure proper serialization
@@ -451,13 +520,12 @@ def get_orders(
 @router.get("/pending-counts", response_model=Dict[str, int])
 def get_pending_counts(
     current_user: models.User = Depends(get_current_active_user),
+    scope: StoreDataScope = Depends(get_store_data_scope),
     db: Session = Depends(get_db),
 ):
-    """Counts of not-yet-completed orders for Digital vs Physical tabs.
-
-    Digital is determined from Yandex order delivery.type == 'DIGITAL'.
-    """
+    """Counts of not-yet-completed orders for Digital vs Physical tabs (current store + marketplace)."""
     business_id = get_business_id(current_user)
+    store = scope.store
     delivery_type = models.Order.yandex_order_data["delivery"]["type"].astext
 
     not_done_statuses = [
@@ -465,25 +533,158 @@ def get_pending_counts(
         models.OrderStatus.PROCESSING,
     ]
 
-    digital = (
-        db.query(func.count(func.distinct(models.Order.yandex_order_id)))
-        .filter(models.Order.business_id == business_id)
-        .filter(models.Order.status.in_(not_done_statuses))
-        .filter(delivery_type == "DIGITAL")
-        .scalar()
-        or 0
-    )
+    def pending_q(digital: bool):
+        q = apply_order_marketplace_filter(
+            db.query(func.count(func.distinct(models.Order.yandex_order_id))).filter(
+                models.Order.business_id == business_id,
+                models.Order.store_id == store.id,
+                models.Order.status.in_(not_done_statuses),
+            ),
+            scope,
+        )
+        if digital:
+            q = q.filter(delivery_type == "DIGITAL")
+        else:
+            q = q.filter(func.coalesce(delivery_type, "") != "DIGITAL")
+        return int(q.scalar() or 0)
 
-    physical = (
-        db.query(func.count(func.distinct(models.Order.yandex_order_id)))
-        .filter(models.Order.business_id == business_id)
-        .filter(models.Order.status.in_(not_done_statuses))
-        .filter(func.coalesce(delivery_type, "") != "DIGITAL")
-        .scalar()
-        or 0
-    )
+    return {"digital": pending_q(True), "physical": pending_q(False)}
 
-    return {"digital": int(digital), "physical": int(physical)}
+
+@router.get("/status-counts", response_model=Dict[str, int])
+def get_status_counts(
+    is_digital: Optional[bool] = None,
+    start_date: str = None,
+    end_date: str = None,
+    current_user: models.User = Depends(get_current_active_user),
+    scope: StoreDataScope = Depends(get_store_data_scope),
+    db: Session = Depends(get_db),
+):
+    """Status counts for current store + marketplace scope (matches GET /orders list)."""
+    from datetime import datetime
+
+    business_id = get_business_id(current_user)
+    store = scope.store
+    delivery_type = models.Order.yandex_order_data["delivery"]["type"].astext
+
+    base = apply_order_marketplace_filter(
+        db.query(models.Order.status, func.count(func.distinct(models.Order.yandex_order_id))).filter(
+            models.Order.business_id == business_id,
+            models.Order.store_id == store.id,
+        ),
+        scope,
+    ).group_by(models.Order.status)
+    if is_digital is True:
+        base = base.filter(delivery_type == "DIGITAL")
+    elif is_digital is False:
+        base = base.filter(func.coalesce(delivery_type, "") != "DIGITAL")
+    if start_date:
+        try:
+            start_dt = datetime.fromisoformat(start_date.replace("Z", "+00:00"))
+            base = base.filter(models.Order.created_at >= start_dt)
+        except Exception:
+            pass
+    if end_date:
+        try:
+            end_dt = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
+            base = base.filter(models.Order.created_at <= end_dt)
+        except Exception:
+            pass
+
+    rows = base.all()
+    counts = {
+        "pending": 0,
+        "processing": 0,
+        "completed": 0,
+        "cancelled": 0,
+        "finished": 0,
+        "failed": 0,
+    }
+    for status_val, cnt in rows:
+        key = (status_val.value if hasattr(status_val, "value") else str(status_val)).lower()
+        if key in counts:
+            counts[key] = int(cnt)
+    return counts
+
+
+class OrderAssignBody(BaseModel):
+    assign_to_user_id: Optional[int] = None
+
+
+@router.get("/assignees")
+def list_order_assignees(
+    marketplace: str = "yandex",
+    current_user: models.User = Depends(get_current_active_user),
+    store: models.MarketStore = Depends(get_current_store),
+    db: Session = Depends(get_db),
+):
+    from app.order_assignment import eligible_assignees
+
+    business_id = get_business_id(current_user)
+    users = eligible_assignees(db, business_id, store.id, marketplace)
+    return [
+        {
+            "id": u.id,
+            "name": ((u.name or "").strip() or None),
+            "email": u.email,
+            "is_admin": u.is_admin,
+        }
+        for u in users
+    ]
+
+
+@router.post("/by-yandex-id/{yandex_order_id}/assign")
+def assign_order(
+    yandex_order_id: str,
+    body: OrderAssignBody,
+    current_user: models.User = Depends(get_current_active_user),
+    store: models.MarketStore = Depends(get_current_store),
+    db: Session = Depends(get_db),
+):
+    from app.order_assignment import eligible_assignees, get_assignment
+    from app.staff_access import assert_store_access
+
+    assert_store_access(current_user, store)
+    business_id = get_business_id(current_user)
+    row = (
+        db.query(models.Order)
+        .filter(
+            models.Order.business_id == business_id,
+            models.Order.store_id == store.id,
+            models.Order.yandex_order_id == str(yandex_order_id),
+        )
+        .first()
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Order not found")
+    marketplace = row.marketplace or "yandex"
+    target_id = body.assign_to_user_id or current_user.id
+    eligible = {u.id for u in eligible_assignees(db, business_id, store.id, marketplace)}
+    if target_id not in eligible:
+        raise HTTPException(status_code=403, detail="That user cannot be assigned to this order")
+    existing = get_assignment(db, store.id, yandex_order_id)
+    if existing:
+        existing.assigned_to_user_id = target_id
+        existing.assigned_by_user_id = current_user.id
+        existing.marketplace = marketplace
+    else:
+        db.add(
+            models.OrderAssignment(
+                business_id=business_id,
+                store_id=store.id,
+                marketplace=marketplace,
+                yandex_order_id=str(yandex_order_id),
+                assigned_to_user_id=target_id,
+                assigned_by_user_id=current_user.id,
+            )
+        )
+    db.commit()
+    assignee = db.query(models.User).filter(models.User.id == target_id).first()
+    return {
+        "success": True,
+        "assigned_to_user_id": target_id,
+        "assigned_to_name": (((assignee.name or "").strip() or assignee.email) if assignee else None),
+    }
 
 
 @router.get("/{order_id}", response_model=schemas.Order)

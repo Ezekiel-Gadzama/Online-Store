@@ -6,6 +6,8 @@ from typing import List
 from app.database import get_db
 from app import models, schemas
 from app.auth import get_current_active_user, get_business_id
+from app.store_context import get_current_store
+from app.store_scope import email_templates_for_store
 from app.utils.export_utils import (
     extract_text_from_file,
     build_txt_activation,
@@ -22,13 +24,12 @@ def get_email_templates(
     skip: int = Query(0, ge=0, description="Pagination offset"),
     limit: int = Query(15, ge=1, le=5000, description="Pagination page size (higher for dropdowns)"),
     current_user: models.User = Depends(get_current_active_user),
+    store: models.MarketStore = Depends(get_current_store),
     db: Session = Depends(get_db)
 ):
-    """Get all email templates with optional search. Returns templates for the current user's business, plus global templates (business_id is NULL)."""
+    """Get activation templates for the current store."""
     business_id = get_business_id(current_user)
-    query = db.query(models.EmailTemplate).filter(
-        (models.EmailTemplate.business_id == business_id) | (models.EmailTemplate.business_id == None)
-    )
+    query = email_templates_for_store(db.query(models.EmailTemplate), business_id, store.id)
     
     if search:
         search_term = f"%{search.lower()}%"
@@ -132,12 +133,14 @@ async def create_activation_template_from_file(
 def create_email_template(
     template: schemas.EmailTemplateCreate,
     current_user: models.User = Depends(get_current_active_user),
+    store: models.MarketStore = Depends(get_current_store),
     db: Session = Depends(get_db)
 ):
     """Create a new email template"""
     business_id = get_business_id(current_user)
     template_data = template.dict()
     template_data['business_id'] = business_id
+    template_data['store_id'] = store.id
     db_template = models.EmailTemplate(**template_data)
     db.add(db_template)
     db.commit()

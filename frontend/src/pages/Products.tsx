@@ -40,6 +40,8 @@ export default function Products() {
         product_type: typeFilter || undefined,
         search: searchTerm || undefined,
       }),
+    staleTime: 60_000,
+    gcTime: 5 * 60 * 1000,
   })
 
   // Fetch all documentations and templates for the table
@@ -680,14 +682,14 @@ function ProductViewModal({
                       max={todayStr}
                       className="px-2 py-1.5 border border-gray-300 rounded text-sm disabled:bg-gray-100"
                     />
-                    <label className="flex items-center gap-1 mt-1 text-xs text-gray-600">
+                    <div className="flex items-center gap-1 mt-1 text-xs text-gray-600">
                       <input
                         type="checkbox"
                         checked={costEndTillDate}
                         onChange={(e) => setCostEndTillDate(e.target.checked)}
                       />
                       Till date
-                    </label>
+                    </div>
                   </div>
                   <button
                     type="button"

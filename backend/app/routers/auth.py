@@ -1,3 +1,4 @@
+import os
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from datetime import timedelta
@@ -10,8 +11,42 @@ from app.auth import (
 )
 from app.config import settings
 from app.services.email_service import EmailService
+from app.staff_permissions import effective_permissions_dict
+from app.store_context import parse_store_header
 
 router = APIRouter()
+
+
+def _user_to_schema(user: models.User, db: Session, store_id: int | None = None) -> schemas.User:
+    permissions = schemas.UserPermissions(**effective_permissions_dict(user, store_id))
+    business_name = user.business_name if user.is_admin else None
+    if not user.is_admin and user.created_by_id:
+        admin_user = db.query(models.User).filter(models.User.id == user.created_by_id).first()
+        business_name = admin_user.business_name if admin_user else None
+    owner_restrictions = None
+    raw_locks = getattr(user, "owner_restrictions", None)
+    if isinstance(raw_locks, dict) and raw_locks:
+        owner_restrictions = schemas.OwnerRestrictions(**raw_locks)
+    return schemas.User(
+        id=user.id,
+        email=user.email,
+        is_admin=user.is_admin,
+        is_business_admin=bool(getattr(user, "is_business_admin", False)),
+        business_admin_all_stores=bool(getattr(user, "business_admin_all_stores", True)),
+        owner_restrictions=owner_restrictions,
+        created_by_id=user.created_by_id,
+        permissions=permissions,
+        is_active=user.is_active,
+        name=user.name,
+        business_name=business_name,
+        business_username=user.business_username if user.is_admin else None,
+        timezone=user.timezone,
+        store_market_access=user.store_market_access if isinstance(user.store_market_access, dict) else None,
+        store_permissions=user.store_permissions if isinstance(user.store_permissions, dict) else None,
+        store_ui_preferences=user.store_ui_preferences if isinstance(user.store_ui_preferences, dict) else None,
+        created_at=user.created_at,
+        updated_at=user.updated_at,
+    )
 
 
 def _resolve_admin_by_identifier(db: Session, identifier: str):
@@ -29,19 +64,17 @@ def _resolve_admin_by_identifier(db: Session, identifier: str):
     ).first()
     if admin:
         return admin
-    # Try exact match as business_username
-    admin = db.query(models.User).filter(
-        models.User.business_username == iden,
-        models.User.is_admin == True
-    ).first()
-    if admin:
-        return admin
-    # Try with @ prefix if identifier doesn't start with @ (e.g. "digital_sales" -> "@digital_sales")
-    if not iden.startswith("@"):
-        admin = db.query(models.User).filter(
-            models.User.business_username == ("@" + iden),
-            models.User.is_admin == True
-        ).first()
+    from sqlalchemy import func
+
+    uname = iden if iden.startswith("@") else ("@" + iden)
+    admin = (
+        db.query(models.User)
+        .filter(
+            models.User.is_admin == True,
+            func.lower(models.User.business_username) == uname.lower(),
+        )
+        .first()
+    )
     return admin
 
 
@@ -75,21 +108,16 @@ def signup(user_data: schemas.UserSignup, db: Session = Depends(get_db)):
     # Create user
     hashed_password = get_password_hash(user_data.password)
     
-    # Set default permissions
-    default_permissions = {
-        "view_staff": False,
-        "view_settings": False,
-        "client_right": False,
-        "view_marketing_emails": False,
-        "dashboard_right": False,
-        "view_product_prices": True  # Default: True
-    }
-    
+    from app.staff_defaults import DEFAULT_STAFF_PERMISSIONS, DEFAULT_OWNER_RESTRICTIONS
+
+    owner_locks = dict(DEFAULT_OWNER_RESTRICTIONS) if is_admin else {}
+
     db_user = models.User(
         email=user_data.email,
         hashed_password=hashed_password,
         is_admin=is_admin,
-        permissions=default_permissions,
+        permissions=dict(DEFAULT_STAFF_PERMISSIONS) if not is_admin else {},
+        owner_restrictions=owner_locks,
         is_active=True,
         business_name=(user_data.business_name or "").strip() or None,
         business_username=((user_data.business_username or "").strip() or None) if is_admin else None,
@@ -97,10 +125,12 @@ def signup(user_data: schemas.UserSignup, db: Session = Depends(get_db)):
     
     db.add(db_user)
     db.flush()  # Flush to get the user ID
-    
-    # For admin, business_id is their own ID (set after flush)
-    # For staff, business_id will be set when they're created by admin
-    
+
+    if is_admin and os.environ.get("YANDEX_MARKET_API_TOKEN", "").strip():
+        from app.vps_env import apply_env_settings_for_business
+
+        apply_env_settings_for_business(db, db_user.id)
+
     db.commit()
     db.refresh(db_user)
     
@@ -112,24 +142,7 @@ def signup(user_data: schemas.UserSignup, db: Session = Depends(get_db)):
         user_id=db_user.id
     )
     
-    # Convert permissions dict to UserPermissions schema
-    permissions = schemas.UserPermissions(**db_user.permissions)
-    business_name = db_user.business_name if db_user.is_admin else None
-    if not db_user.is_admin and db_user.created_by_id:
-        admin_user = db.query(models.User).filter(models.User.id == db_user.created_by_id).first()
-        business_name = admin_user.business_name if admin_user else None
-
-    user_response = schemas.User(
-        id=db_user.id,
-        email=db_user.email,
-        is_admin=db_user.is_admin,
-        created_by_id=db_user.created_by_id,
-        permissions=permissions,
-        is_active=db_user.is_active,
-        business_name=business_name,
-        created_at=db_user.created_at,
-        updated_at=db_user.updated_at
-    )
+    user_response = _user_to_schema(db_user, db)
     
     return schemas.Token(
         access_token=access_token,
@@ -181,8 +194,7 @@ def login(credentials: schemas.UserLogin, db: Session = Depends(get_db)):
         )
     
     # Create access token
-    # If remember_me is enabled, extend the session significantly (e.g. 30 days)
-    if getattr(credentials, "remember_me", False):
+    if credentials.remember_me:
         access_token_expires = timedelta(days=30)
     else:
         access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
@@ -192,24 +204,7 @@ def login(credentials: schemas.UserLogin, db: Session = Depends(get_db)):
         user_id=user.id
     )
     
-    # Convert permissions dict to UserPermissions schema
-    permissions = schemas.UserPermissions(**user.permissions) if user.permissions else schemas.UserPermissions()
-    business_name = user.business_name if user.is_admin else None
-    if not user.is_admin and user.created_by_id:
-        admin_user = db.query(models.User).filter(models.User.id == user.created_by_id).first()
-        business_name = admin_user.business_name if admin_user else None
-
-    user_response = schemas.User(
-        id=user.id,
-        email=user.email,
-        is_admin=user.is_admin,
-        created_by_id=user.created_by_id,
-        permissions=permissions,
-        is_active=user.is_active,
-        business_name=business_name,
-        created_at=user.created_at,
-        updated_at=user.updated_at
-    )
+    user_response = _user_to_schema(user, db)
     
     return schemas.Token(
         access_token=access_token,
@@ -221,25 +216,30 @@ def login(credentials: schemas.UserLogin, db: Session = Depends(get_db)):
 @router.get("/me", response_model=schemas.User)
 def get_current_user_info(
     current_user: models.User = Depends(get_current_active_user),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    store_id: int | None = Depends(parse_store_header),
 ):
     """Get current user information"""
-    permissions = schemas.UserPermissions(**current_user.permissions) if current_user.permissions else schemas.UserPermissions()
-    business_name = current_user.business_name if current_user.is_admin else None
-    if not current_user.is_admin and current_user.created_by_id:
-        admin_user = db.query(models.User).filter(models.User.id == current_user.created_by_id).first()
-        business_name = admin_user.business_name if admin_user else None
-    return schemas.User(
-        id=current_user.id,
-        email=current_user.email,
-        is_admin=current_user.is_admin,
-        created_by_id=current_user.created_by_id,
-        permissions=permissions,
-        is_active=current_user.is_active,
-        business_name=business_name,
-        created_at=current_user.created_at,
-        updated_at=current_user.updated_at
-    )
+    return _user_to_schema(current_user, db, store_id)
+
+
+@router.patch("/me/profile", response_model=schemas.User)
+def update_my_profile(
+    body: schemas.UserProfileUpdate,
+    current_user: models.User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """Update profile fields for the logged-in user (e.g. timezone)."""
+    if body.name is not None:
+        current_user.name = body.name.strip() or None
+    if body.timezone is not None:
+        tz = body.timezone.strip() if body.timezone else None
+        current_user.timezone = tz or None
+    if body.store_ui_preferences is not None:
+        current_user.store_ui_preferences = body.store_ui_preferences
+    db.commit()
+    db.refresh(current_user)
+    return _user_to_schema(current_user, db)
 
 
 @router.post("/request-password-reset")

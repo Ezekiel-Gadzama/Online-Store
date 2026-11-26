@@ -60,7 +60,7 @@ export default function Login() {
               />
             </div>
             <div className="flex items-center gap-2 px-3 py-2 border border-t-0 border-gray-300 bg-gray-50">
-              <label className="flex items-center gap-2 cursor-pointer">
+              <div className="flex items-center gap-2">
                 <input
                   type="checkbox"
                   checked={isOwner}
@@ -68,7 +68,7 @@ export default function Login() {
                   className="rounded border-gray-300"
                 />
                 <span className="text-sm text-gray-700">Owner</span>
-              </label>
+              </div>
             </div>
             {!isOwner && (
               <div>
@@ -112,7 +112,7 @@ export default function Login() {
 
           <div>
             <div className="flex items-center justify-between mb-3">
-              <label className="flex items-center gap-2">
+              <div className="flex items-center gap-2">
                 <input
                   type="checkbox"
                   checked={rememberMe}
@@ -120,7 +120,7 @@ export default function Login() {
                   className="h-4 w-4 text-blue-600 border-gray-300 rounded"
                 />
                 <span className="text-sm text-gray-700">Remember me on this device</span>
-              </label>
+              </div>
             </div>
             <button
               type="submit"

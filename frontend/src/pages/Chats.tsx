@@ -1,9 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useInfiniteQuery, useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { chatApi, ChatListItem, ChatMessage } from '../api/chat'
+import { chatApi, ChatListItem, chatMessageSenderLabel } from '../api/chat'
+import { ordersApi } from '../api/orders'
 import { MessageCircle, Send, RefreshCw, CheckCheck, Check } from 'lucide-react'
 import { useTimeZone } from '../contexts/TimeZoneContext'
 import FeedbackButton from '../components/FeedbackButton'
+import { useStore } from '../contexts/StoreContext'
+import { formatApiError } from '../utils/apiError'
 
 function mapChatTitle(chat: ChatListItem): string {
   const ctxType = chat?.context?.type
@@ -13,15 +16,11 @@ function mapChatTitle(chat: ChatListItem): string {
   return `Chat #${chat.chatId}`
 }
 
-function mapAuthor(a: ChatMessage['author']) {
-  if (a === 'SELLER') return 'You'
-  if (a === 'CUSTOMER') return 'Customer'
-  return 'System'
-}
-
 export default function Chats() {
   const { formatDateTime } = useTimeZone()
+  const { currentStore } = useStore()
   const queryClient = useQueryClient()
+  const storeId = currentStore?.id
   const [selectedChatId, setSelectedChatId] = useState<number | null>(null)
   const [messageText, setMessageText] = useState('')
   const [chatFilter, setChatFilter] = useState<'all' | 'orders' | 'direct' | 'returns'>('all')
@@ -49,15 +48,18 @@ export default function Chats() {
   const {
     data: chatsPages,
     isFetching: isFetchingChats,
+    isError: chatsListError,
+    error: chatsListErr,
     refetch: refetchChats,
     fetchNextPage,
     hasNextPage,
     isFetchingNextPage,
   } = useInfiniteQuery({
-    queryKey: ['chats', 'list', chatsPageSize],
+    queryKey: ['chats', 'list', storeId, chatsPageSize],
     queryFn: ({ pageParam }) => chatApi.listChats(chatsPageSize, pageParam as string | undefined),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (lastPage) => lastPage?.nextPageToken ?? undefined,
+    enabled: storeId != null,
     placeholderData: (prev) => prev,
   })
 
@@ -152,6 +154,29 @@ export default function Chats() {
 
   const selectedChat = chats.find((c) => c.chatId === selectedChatId) ?? null
 
+  const selectedOrderYandexId =
+    selectedChat?.orderId != null ? String(selectedChat.orderId) : null
+
+  const { data: chatOrder } = useQuery({
+    queryKey: ['orders', 'chat-header', storeId, selectedOrderYandexId],
+    queryFn: async () => {
+      const rows = await ordersApi.getAll({ limit: 500 })
+      return rows.find((o) => o.yandex_order_id === selectedOrderYandexId) ?? null
+    },
+    enabled: storeId != null && !!selectedOrderYandexId,
+    staleTime: 60_000,
+  })
+
+  const chatProductName = (() => {
+    if (!chatOrder) return null
+    if (chatOrder.items?.length) {
+      const names = chatOrder.items.map((i) => i.product_name).filter(Boolean)
+      if (names.length === 1) return names[0]
+      if (names.length > 1) return `${names[0]} (+${names.length - 1} more)`
+    }
+    return chatOrder.product_name?.trim() || null
+  })()
+
   return (
     <div>
       <div className="flex items-center justify-between mb-6">
@@ -198,8 +223,14 @@ export default function Chats() {
               </div>
             </div>
             <div className="max-h-[70vh] overflow-y-auto">
-              {filteredChats.length === 0 ? (
-                <div className="p-4 text-sm text-gray-500">No chats found.</div>
+              {chatsListError ? (
+                <div className="p-4 text-sm text-red-600">
+                  {formatApiError(chatsListErr, 'Could not load chats. Configure marketplace API for this store under Settings.')}
+                </div>
+              ) : filteredChats.length === 0 ? (
+                <div className="p-4 text-sm text-gray-500">
+                  {isFetchingChats ? 'Loading chats…' : 'No chats found.'}
+                </div>
               ) : (
                 <ul className="divide-y divide-gray-200">
                   {visibleChats.map((chat) => {
@@ -224,6 +255,7 @@ export default function Chats() {
                         queryClient.setQueryData(['order-chat-unread', orderKey], 0)
                         await chatApi.markAsRead(orderKey)
                         queryClient.refetchQueries({ queryKey: ['order-chat-unread', orderKey] })
+                        queryClient.invalidateQueries({ queryKey: ['orders-chat-meta'] })
                       }
                       queryClient.invalidateQueries({ queryKey: ['chats', 'list'] })
                     }
@@ -329,6 +361,11 @@ export default function Chats() {
               <div className="text-sm font-semibold text-gray-900">
                 {selectedChat ? mapChatTitle(selectedChat) : 'Select a chat'}
               </div>
+              {chatProductName ? (
+                <div className="text-sm font-medium text-gray-800 mt-1 truncate" title={chatProductName}>
+                  {chatProductName}
+                </div>
+              ) : null}
               {selectedChat?.context?.customer?.name && (
                 <div className="text-xs text-gray-500 mt-1">Customer: {selectedChat.context.customer.name}</div>
               )}
@@ -361,7 +398,10 @@ export default function Chats() {
                       queryClient.setQueryData(['order-chat-unread', orderKey], 0)
                         chatApi
                           .markAsRead(orderKey)
-                          .then(() => queryClient.refetchQueries({ queryKey: ['order-chat-unread', orderKey] }))
+                          .then(() => {
+                            queryClient.refetchQueries({ queryKey: ['order-chat-unread', orderKey] })
+                            queryClient.invalidateQueries({ queryKey: ['orders-chat-meta'] })
+                          })
                           .catch(() => queryClient.refetchQueries({ queryKey: ['order-chat-unread', orderKey] }))
                       }
                     }
@@ -392,7 +432,7 @@ export default function Chats() {
                             : 'bg-gray-100 text-gray-700'
                       }`}
                     >
-                      <div className="text-[11px] opacity-75 mb-1">{mapAuthor(m.author)}</div>
+                      <div className="text-[11px] opacity-75 mb-1">{chatMessageSenderLabel(m)}</div>
                       <div>{m.text}</div>
                       {m.created_at && (
                         <div className="text-[11px] opacity-75 mt-1">

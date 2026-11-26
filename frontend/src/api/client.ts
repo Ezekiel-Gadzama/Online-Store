@@ -1,5 +1,11 @@
 import axios, { AxiosError } from 'axios'
 import { getToken, clearToken } from '../utils/authStorage'
+import {
+  getActiveStoreId,
+  getDataViewHeader,
+  getMarketplaceHeader,
+  getMarketplacesHeader,
+} from '../utils/storeSelection'
 
 // Store reference to showError function
 let showConfigurationError: ((error: any) => void) | null = null
@@ -20,6 +26,22 @@ apiClient.interceptors.request.use((config) => {
   const token = getToken()
   if (token) {
     config.headers.Authorization = `Bearer ${token}`
+  }
+  const storeId = getActiveStoreId()
+  if (storeId != null) {
+    config.headers['X-Store-Id'] = String(storeId)
+  }
+  const markets = getMarketplacesHeader()
+  if (markets) {
+    config.headers['X-Marketplaces'] = markets
+  }
+  const dataView = getDataViewHeader()
+  if (dataView) {
+    config.headers['X-Data-View'] = dataView
+  }
+  const marketplace = getMarketplaceHeader()
+  if (marketplace) {
+    config.headers['X-Marketplace'] = marketplace
   }
   return config
 })

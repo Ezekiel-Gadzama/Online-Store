@@ -1,4 +1,4 @@
-# Run Yandex Market Manager on Windows (PowerShell)
+# Run Online Store on Windows (PowerShell)
 
 Use these commands when testing on your **Windows laptop** in PowerShell. (For the VPS, use the bash commands in `DEPLOY_UBUNTU.md`.)
 

@@ -8,8 +8,18 @@ from app.database import get_db
 from app import models, schemas
 from app.services.yandex_api import YandexMarketAPI
 from app.auth import get_current_active_user, get_business_id
+from app.store_context import get_current_store
+from app.store_scope import products_for_store
 
 router = APIRouter()
+
+
+def _product_for_store(
+    db: Session, product_id: int, business_id: int, store_id: int
+) -> models.Product | None:
+    return products_for_store(db.query(models.Product), business_id, store_id).filter(
+        models.Product.id == product_id
+    ).first()
 
 
 def _convert_product_json_fields(product: models.Product) -> dict:
@@ -48,11 +58,12 @@ def get_products(
     product_type: str = None,
     search: str = Query(None, description="Search by name, description, or activation key"),
     current_user: models.User = Depends(get_current_active_user),
+    store: models.MarketStore = Depends(get_current_store),
     db: Session = Depends(get_db)
 ):
-    """Get all products with optional filters. Only returns products for the current user's business."""
+    """Get all products with optional filters. Only returns products for the current store."""
     business_id = get_business_id(current_user)
-    query = db.query(models.Product).filter(models.Product.business_id == business_id)
+    query = products_for_store(db.query(models.Product), business_id, store.id)
     
     if is_active is not None:
         query = query.filter(models.Product.is_active == is_active)
@@ -82,7 +93,7 @@ def get_products(
         # Search in generated_keys
         # We need to check if any key in the JSON array matches
         matching_product_ids = []
-        all_products = db.query(models.Product).filter(models.Product.business_id == business_id).all()
+        all_products = products_for_store(db.query(models.Product), business_id, store.id).all()
         for p in all_products:
             if p.generated_keys:
                 try:
@@ -103,7 +114,12 @@ def get_products(
         else:
             query = query.filter(name_desc_filter)
     
-    products = query.offset(skip).limit(limit).all()
+    products = (
+        query.order_by(models.Product.is_active.desc(), models.Product.name.asc())
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
     return [_convert_product_json_fields(p) for p in products]
 
 
@@ -216,14 +232,12 @@ def get_product_full_details(product_id: int, db: Session = Depends(get_db)):
 def get_product_cost_history(
     product_id: int,
     current_user: models.User = Depends(get_current_active_user),
+    store: models.MarketStore = Depends(get_current_store),
     db: Session = Depends(get_db),
 ):
     """Get cost history for a product. Used for profit calculation by order date."""
     business_id = get_business_id(current_user)
-    product = db.query(models.Product).filter(
-        models.Product.id == product_id,
-        models.Product.business_id == business_id,
-    ).first()
+    product = _product_for_store(db, product_id, business_id, store.id)
     if not product:
         raise HTTPException(status_code=404, detail="Product not found")
     rows = (
@@ -240,14 +254,12 @@ def create_product_cost_history(
     product_id: int,
     body: schemas.ProductCostHistoryCreate,
     current_user: models.User = Depends(get_current_active_user),
+    store: models.MarketStore = Depends(get_current_store),
     db: Session = Depends(get_db),
 ):
     """Add a cost period for a product. end_date null = till date / ongoing."""
     business_id = get_business_id(current_user)
-    product = db.query(models.Product).filter(
-        models.Product.id == product_id,
-        models.Product.business_id == business_id,
-    ).first()
+    product = _product_for_store(db, product_id, business_id, store.id)
     if not product:
         raise HTTPException(status_code=404, detail="Product not found")
     start_date = date_type.fromisoformat(body.start_date)
@@ -272,14 +284,12 @@ def update_product_cost_history(
     cost_id: int,
     body: schemas.ProductCostHistoryUpdate,
     current_user: models.User = Depends(get_current_active_user),
+    store: models.MarketStore = Depends(get_current_store),
     db: Session = Depends(get_db),
 ):
     """Update a cost history entry."""
     business_id = get_business_id(current_user)
-    product = db.query(models.Product).filter(
-        models.Product.id == product_id,
-        models.Product.business_id == business_id,
-    ).first()
+    product = _product_for_store(db, product_id, business_id, store.id)
     if not product:
         raise HTTPException(status_code=404, detail="Product not found")
     row = db.query(models.ProductCostHistory).filter(
@@ -306,14 +316,12 @@ def delete_product_cost_history(
     product_id: int,
     cost_id: int,
     current_user: models.User = Depends(get_current_active_user),
+    store: models.MarketStore = Depends(get_current_store),
     db: Session = Depends(get_db),
 ):
     """Delete a cost history entry."""
     business_id = get_business_id(current_user)
-    product = db.query(models.Product).filter(
-        models.Product.id == product_id,
-        models.Product.business_id == business_id,
-    ).first()
+    product = _product_for_store(db, product_id, business_id, store.id)
     if not product:
         raise HTTPException(status_code=404, detail="Product not found")
     row = db.query(models.ProductCostHistory).filter(

@@ -1,6 +1,5 @@
 import React, { createContext, useContext, useMemo } from 'react'
-import { useQuery } from '@tanstack/react-query'
-import { settingsApi } from '../api/settings'
+import { useAuth } from './AuthContext'
 
 type TimeZoneContextValue = {
   timeZone: string
@@ -10,10 +9,7 @@ type TimeZoneContextValue = {
 const TimeZoneContext = createContext<TimeZoneContextValue | null>(null)
 
 export function TimeZoneProvider({ children }: { children: React.ReactNode }) {
-  const { data: settings } = useQuery({
-    queryKey: ['app-settings'],
-    queryFn: () => settingsApi.get(),
-  })
+  const { user } = useAuth()
 
   const localTz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
   const defaultYandexTz = 'Europe/Moscow'
@@ -30,7 +26,9 @@ export function TimeZoneProvider({ children }: { children: React.ReactNode }) {
 
   // Yandex timestamps are already provided in Moscow time (e.g. +03:00).
   // If user hasn't selected a timezone yet, default to Europe/Moscow instead of device timezone.
-  const timeZone = settings?.timezone || (isTimeZoneSupported(defaultYandexTz) ? defaultYandexTz : localTz)
+  const timeZone =
+    user?.timezone ||
+    (isTimeZoneSupported(defaultYandexTz) ? defaultYandexTz : localTz)
 
   const value = useMemo<TimeZoneContextValue>(() => {
     const formatDateTime = (isoOrDate: string | undefined, opts?: { withSeconds?: boolean }) => {

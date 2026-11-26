@@ -1,0 +1,17 @@
+---
+description: Export products from a Yandex store into store-type default catalog files without duplicates
+globs:
+  - backend/data/store_templates/**
+  - backend/scripts/store_setup.py
+  - STORE_SETUP.md
+---
+
+When the user wants default product uploads for a store type (e.g. digital):
+
+1. Use template id from `backend/app/store_templates.py` (not a brand name).
+2. Merge via `python scripts/store_setup.py append-catalog <template> --store-id <id>` or `--business` / `--campaign`.
+3. Default merge updates existing `offerId`s; use `--new-only` to skip updates.
+4. Commit `backend/data/store_templates/<template>/catalog.json` after a successful append.
+5. Do not recommend cross-business migration env vars or a second “source” store at deploy time — the git catalog is the source of truth.
+
+Read `STORE_SETUP.md` for push/db-import on new servers.

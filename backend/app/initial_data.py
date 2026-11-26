@@ -32,7 +32,7 @@ def create_default_settings():
                 processing_time_max=30,
                 maximum_wait_time_value=6,
                 maximum_wait_time_unit="hours",
-                working_hours_text="Мы работаем ежедневно с 10:00 до 00:00 по московскому времени.",
+                working_hours_text="Мы работаем ежедневно с 10:00 до 23:00 по московскому времени.",
             )
             db.add(default_settings)
         
@@ -87,43 +87,63 @@ def create_default_email_template():
 
 
 def create_default_marketing_email_template():
-    """Create a default marketing email template for each admin"""
+    """Legacy hook — digital marketing defaults are created per store in store_defaults.seed_store_type_defaults."""
     db = SessionLocal()
     try:
-        # Get all admin users
-        admins = db.query(models.User).filter(models.User.is_admin == True).all()
-        
-        if not admins:
-            print("No admin users found. Skipping default marketing template creation.")
-            return
-        
-        # Create default template for each admin's business
-        for admin in admins:
-            # Check if default marketing template already exists for this business
-            existing = db.query(models.MarketingEmailTemplate).filter(
-                models.MarketingEmailTemplate.is_default == True,
-                models.MarketingEmailTemplate.business_id == admin.id
-            ).first()
-            
-            if existing:
-                continue
-            
-            default_template = models.MarketingEmailTemplate(
-                name="Default Marketing Template",
-                subject="Your Subscription Has Expired",
-                body="<p>Additional information to add to the broadcasted email.</p>",
-                is_default=True,
-                auto_broadcast_enabled=False,
-                frequency_days=None,
-                business_id=admin.id
-            )
-            
-            db.add(default_template)
-        
+        from app.store_defaults import seed_store_type_defaults
+
+        for store in db.query(models.MarketStore).order_by(models.MarketStore.id.asc()).all():
+            kinds = [str(k).strip().lower() for k in (store.store_types or []) if str(k).strip()]
+            if kinds:
+                seed_store_type_defaults(db, store.owner_id, store.id, kinds)
         db.commit()
-        print("Default marketing email template created successfully for all admins")
+        print("Store-type marketing defaults ensured for configured stores")
     except Exception as e:
         print(f"Error creating default marketing template: {str(e)}")
+        db.rollback()
+    finally:
+        db.close()
+
+
+def create_default_documentation():
+    """Create default fulfillment documentation for each admin (same idea as activation template)."""
+    db = SessionLocal()
+    try:
+        admins = db.query(models.User).filter(models.User.is_admin.is_(True)).all()
+        if not admins:
+            print("No admin users found. Skipping default documentation creation.")
+            return
+
+        for admin in admins:
+            existing = (
+                db.query(models.Documentation)
+                .filter(
+                    models.Documentation.business_id == admin.id,
+                    models.Documentation.name == "Стандартная инструкция по выполнению заказа",
+                )
+                .first()
+            )
+            if existing:
+                continue
+
+            db.add(
+                models.Documentation(
+                    business_id=admin.id,
+                    name="Стандартная инструкция по выполнению заказа",
+                    description="Базовые шаги для цифровых заказов на Яндекс Маркете.",
+                    type="text",
+                    content=(
+                        "<p>1. Подтвердите сообщение покупателя в чате заказа на Маркете.</p>"
+                        "<p>2. Отправьте инструкции по активации из связанного шаблона.</p>"
+                        "<p>3. Завершите заказ после подтверждения доступа покупателем.</p>"
+                    ),
+                )
+            )
+
+        db.commit()
+        print("Default documentation created successfully for all admins")
+    except Exception as e:
+        print(f"Error creating default documentation: {str(e)}")
         db.rollback()
     finally:
         db.close()

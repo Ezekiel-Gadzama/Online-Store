@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from app.database import get_db
 from app import models, schemas
 from app.auth import get_current_active_user, has_permission, get_business_id
+from app.store_context import get_current_store
 from app.utils.export_utils import (
     extract_text_from_file,
     build_txt_marketing,
@@ -32,7 +33,8 @@ def get_marketing_templates(
     skip: int = Query(0, ge=0, description="Pagination offset"),
     limit: int = Query(15, ge=1, le=5000, description="Pagination page size (higher for dropdowns)"),
     current_user: models.User = Depends(get_current_active_user),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    store: models.MarketStore = Depends(get_current_store),
 ):
     """Get all marketing email templates with optional search. Default templates are sorted first. Requires view_marketing_emails permission."""
     # Check permission
@@ -42,7 +44,10 @@ def get_marketing_templates(
             detail="Permission required: view_marketing_emails"
         )
     business_id = get_business_id(current_user)
-    query = db.query(models.MarketingEmailTemplate).filter(models.MarketingEmailTemplate.business_id == business_id)
+    query = db.query(models.MarketingEmailTemplate).filter(
+        models.MarketingEmailTemplate.business_id == business_id,
+        models.MarketingEmailTemplate.store_id == store.id,
+    )
     
     if search:
         search_term = f"%{search.lower()}%"
@@ -66,7 +71,8 @@ def get_marketing_templates(
 def create_marketing_template(
     template: schemas.MarketingEmailTemplateCreate,
     current_user: models.User = Depends(get_current_active_user),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    store: models.MarketStore = Depends(get_current_store),
 ):
     """Create a new marketing email template. Requires view_marketing_emails permission."""
     # Check permission
@@ -80,13 +86,15 @@ def create_marketing_template(
     if template.is_default:
         existing_default = db.query(models.MarketingEmailTemplate).filter(
             models.MarketingEmailTemplate.business_id == business_id,
-            models.MarketingEmailTemplate.is_default == True
+            models.MarketingEmailTemplate.store_id == store.id,
+            models.MarketingEmailTemplate.is_default == True,
         ).first()
         if existing_default:
             raise HTTPException(status_code=400, detail="A default template already exists. Only one default template is allowed.")
     
     template_data = template.dict()
     template_data['business_id'] = business_id
+    template_data['store_id'] = store.id
     db_template = models.MarketingEmailTemplate(**template_data)
     db.add(db_template)
     db.commit()
