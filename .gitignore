@@ -48,6 +48,3 @@ media/
 
 # Local Telegram / channel exports (not part of the app)
 yandex market API channel/
-
-# Scraped Yandex API doc dumps (use official docs online)
-.cursor/rules/dev_market_partner-api_doc_*

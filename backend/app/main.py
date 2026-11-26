@@ -1194,11 +1194,19 @@ async def lifespan(app: FastAPI):
         print(f"⚠️  Market store bootstrap: {e}")
     
     try:
-        from app.initial_data import create_default_marketing_email_template
+        from app.initial_data import (
+            create_default_documentation,
+            create_default_email_template,
+            create_default_marketing_email_template,
+            create_default_settings,
+        )
 
+        create_default_settings()
+        create_default_email_template()
         create_default_marketing_email_template()
-    except Exception:
-        pass
+        create_default_documentation()
+    except Exception as e:
+        print(f"⚠️  Default data seed: {e}")
     
     # Periodic sync runs automatically - syncs orders (every 1 min) and products (every 15 min)
     # for all businesses with Yandex API configured in Settings

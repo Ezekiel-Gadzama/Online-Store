@@ -47,7 +47,6 @@ Run on the **backend container** (VPS: `docker compose … exec -T backend pytho
 
 - Library: `backend/scripts/review_price_lib.py`
 - CLI: `backend/scripts/review_price_setup.py`
-- Older one-offs: `reveal_hidden_offers_5rub.py`, `restore_hidden_offer_prices.py`, `republish_disabled_offers.py` (superseded by the review scripts for new work)
 
 ## Agent checklist after setup
 

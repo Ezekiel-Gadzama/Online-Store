@@ -1,16 +1,21 @@
 """
-Initialize database - runs migrations and creates default data
-Run this after database is created
+Initialize database on a fresh server (Docker entrypoint / first deploy).
+
+Schema lives in SQLAlchemy models + schema_bootstrap; no separate migration script folder required.
 """
 import sys
-import subprocess
-from app.database import engine, Base, SessionLocal
-from app import models
-from app.initial_data import create_default_email_template
-from sqlalchemy import text
 
-def init_database():
-    """Run Alembic migrations and create default data"""
+from app.database import SessionLocal, engine, Base
+from app.initial_data import (
+    create_default_documentation,
+    create_default_email_template,
+    create_default_marketing_email_template,
+    create_default_settings,
+)
+from app.schema_bootstrap import ensure_database_schema
+
+
+def init_database() -> None:
     print("Ensuring base tables exist...")
     try:
         Base.metadata.create_all(bind=engine)
@@ -19,208 +24,28 @@ def init_database():
         print(f"✗ Error creating base tables: {e}")
         sys.exit(1)
 
-    print("Running Alembic migrations...")
-    tables_created = False
-    try:
-        result = subprocess.run(
-            ["alembic", "upgrade", "head"],
-            capture_output=True,
-            text=True
-        )
-        if result.returncode == 0:
-            print("✓ Database migrations completed successfully")
-            if result.stdout:
-                print(result.stdout)
-            tables_created = True
-        else:
-            print(f"⚠ Migration output: {result.stdout}")
-            print(f"⚠ Migration errors: {result.stderr}")
-            print("  Falling back to create_all()...")
-    except FileNotFoundError:
-        print("⚠ Alembic not found, falling back to create_all()...")
-    except Exception as e:
-        print(f"⚠ Warning: Could not run migrations: {e}")
-        print("  Falling back to create_all()...")
-    
-    if not tables_created:
-        try:
-            Base.metadata.create_all(bind=engine)
-            print("✓ Database tables created using create_all()")
-        except Exception as e2:
-            print(f"✗ Error creating tables: {e2}")
-            sys.exit(1)
-    
-    # Add attachments columns if they don't exist (migration)
-    print("Adding attachments columns if needed...")
     db = SessionLocal()
     try:
-        # Add column to email_templates
-        db.execute(text("""
-            ALTER TABLE email_templates 
-            ADD COLUMN IF NOT EXISTS attachments JSONB DEFAULT '[]'::jsonb
-        """))
-        
-        # Add column to marketing_email_templates
-        db.execute(text("""
-            ALTER TABLE marketing_email_templates 
-            ADD COLUMN IF NOT EXISTS attachments JSONB DEFAULT '[]'::jsonb
-        """))
-        
+        ensure_database_schema(db)
         db.commit()
-        print("✓ Attachments columns added/verified")
+        print("✓ Schema indexes and constraints ready")
     except Exception as e:
         db.rollback()
-        print(f"⚠ Warning: Could not add attachments columns: {e}")
-    finally:
-        db.close()
-    
-    # Add business_id columns if they don't exist (migration)
-    print("Adding business_id columns if needed...")
-    db = SessionLocal()
-    try:
-        # List of tables and their business_id column definitions
-        tables_to_update = [
-            ("products", "ALTER TABLE products ADD COLUMN IF NOT EXISTS business_id INTEGER REFERENCES users(id)"),
-            ("orders", "ALTER TABLE orders ADD COLUMN IF NOT EXISTS business_id INTEGER REFERENCES users(id)"),
-            ("clients", "ALTER TABLE clients ADD COLUMN IF NOT EXISTS business_id INTEGER REFERENCES users(id)"),
-            ("email_templates", "ALTER TABLE email_templates ADD COLUMN IF NOT EXISTS business_id INTEGER REFERENCES users(id)"),
-            ("marketing_email_templates", "ALTER TABLE marketing_email_templates ADD COLUMN IF NOT EXISTS business_id INTEGER REFERENCES users(id)"),
-            ("documentations", "ALTER TABLE documentations ADD COLUMN IF NOT EXISTS business_id INTEGER REFERENCES users(id)"),
-        ]
-        
-        for table_name, alter_sql in tables_to_update:
-            try:
-                db.execute(text(alter_sql))
-                db.commit()
-            except Exception as e:
-                db.rollback()
-                print(f"  ⚠ Warning: Could not add business_id to {table_name}: {str(e)}")
-        
-        # Special handling for app_settings (needs UNIQUE constraint)
-        try:
-            db.execute(text("ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS business_id INTEGER REFERENCES users(id)"))
-            db.commit()
-            # Try to add unique constraint (might fail if duplicates exist)
-            try:
-                db.execute(text("ALTER TABLE app_settings ADD CONSTRAINT app_settings_business_id_unique UNIQUE (business_id)"))
-                db.commit()
-            except:
-                pass  # Constraint might already exist or duplicates exist
-        except Exception as e:
-            db.rollback()
-            print(f"  ⚠ Warning: Could not add business_id to app_settings: {str(e)}")
-        
-        # Create indexes for better query performance
-        indexes = [
-            ("CREATE INDEX IF NOT EXISTS idx_products_business_id ON products(business_id)"),
-            ("CREATE INDEX IF NOT EXISTS idx_orders_business_id ON orders(business_id)"),
-            ("CREATE INDEX IF NOT EXISTS idx_clients_business_id ON clients(business_id)"),
-            ("CREATE INDEX IF NOT EXISTS idx_email_templates_business_id ON email_templates(business_id)"),
-            ("CREATE INDEX IF NOT EXISTS idx_marketing_email_templates_business_id ON marketing_email_templates(business_id)"),
-            ("CREATE INDEX IF NOT EXISTS idx_documentations_business_id ON documentations(business_id)"),
-            ("CREATE INDEX IF NOT EXISTS idx_app_settings_business_id ON app_settings(business_id)"),
-        ]
-        
-        for index_sql in indexes:
-            try:
-                db.execute(text(index_sql))
-                db.commit()
-            except Exception as e:
-                db.rollback()
-                print(f"  ⚠ Warning: Could not create index: {str(e)}")
-        
-        print("✓ Business ID columns added/verified")
-    except Exception as e:
-        db.rollback()
-        print(f"⚠ Warning: Could not add business_id columns: {e}")
-    finally:
-        db.close()
-    
-    # Allow same staff email in multiple businesses (drop email unique, add per-business indexes)
-    print("Applying users multi-business migration if needed...")
-    db = SessionLocal()
-    try:
-        try:
-            db.execute(text("ALTER TABLE users DROP CONSTRAINT IF EXISTS users_email_key"))
-            db.commit()
-        except Exception:
-            db.rollback()
-        db.execute(text("""
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_users_admin_email_unique
-            ON users (email) WHERE is_admin = true
-        """))
-        db.commit()
-        db.execute(text("""
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_users_staff_email_business_unique
-            ON users (email, created_by_id) WHERE is_admin = false AND created_by_id IS NOT NULL
-        """))
-        db.commit()
-        print("✓ Users multi-business indexes added/verified")
-    except Exception as e:
-        db.rollback()
-        print(f"⚠ Warning: Could not apply users multi-business migration: {e}")
+        print(f"✗ Schema bootstrap: {e}")
+        sys.exit(1)
     finally:
         db.close()
 
-    # Add business_username to users (admin login identifier e.g. @Goal_sale)
-    print("Adding business_username column if needed...")
-    db = SessionLocal()
+    print("Creating default settings and templates...")
     try:
-        db.execute(text("""
-            ALTER TABLE users 
-            ADD COLUMN IF NOT EXISTS business_username VARCHAR
-        """))
-        db.commit()
-        db.execute(text("""
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_users_admin_business_username_unique
-            ON users (business_username) WHERE is_admin = true AND business_username IS NOT NULL AND business_username != ''
-        """))
-        db.commit()
-        print("✓ business_username column added/verified")
-    except Exception as e:
-        db.rollback()
-        print(f"⚠ Warning: Could not add business_username: {e}")
-    finally:
-        db.close()
-
-    # Add name column to users (staff display name)
-    print("Adding name column to users if needed...")
-    db = SessionLocal()
-    try:
-        db.execute(text("""
-            ALTER TABLE users 
-            ADD COLUMN IF NOT EXISTS name VARCHAR
-        """))
-        db.commit()
-        print("✓ name column added/verified")
-    except Exception as e:
-        db.rollback()
-        print(f"⚠ Warning: Could not add name column: {e}")
-    finally:
-        db.close()
-
-    # Add smtp_user column to app_settings if it doesn't exist
-    print("Adding smtp_user column if needed...")
-    db = SessionLocal()
-    try:
-        db.execute(text("""
-            ALTER TABLE app_settings 
-            ADD COLUMN IF NOT EXISTS smtp_user VARCHAR
-        """))
-        db.commit()
-        print("✓ smtp_user column added/verified")
-    except Exception as e:
-        db.rollback()
-        print(f"⚠ Warning: Could not add smtp_user column: {e}")
-    finally:
-        db.close()
-    
-    print("Creating default email template...")
-    try:
+        create_default_settings()
         create_default_email_template()
-        print("✓ Default email template created")
+        create_default_marketing_email_template()
+        create_default_documentation()
+        print("✓ Default business data ready")
     except Exception as e:
-        print(f"⚠ Warning: Could not create default template: {e}")
+        print(f"⚠ Warning: default data: {e}")
+
 
 if __name__ == "__main__":
     init_database()
