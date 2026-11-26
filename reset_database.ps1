@@ -6,7 +6,7 @@ docker-compose down
 
 Write-Host "Removing old database volumes..."
 docker volume rm yandex-market_postgres_data 2>$null
-docker volume rm yandex-market-postgres_data 2>$null
+docker volume rm online_store_postgres_data 2>$null
 
 Write-Host "Creating .env file with correct database name..."
 @"

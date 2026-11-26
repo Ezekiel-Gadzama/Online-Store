@@ -1,7 +1,7 @@
 # Fix Database - Remove old volume and recreate with correct user
 Write-Host "Stopping all containers..."
-docker stop yandex-market-postgres yandex-market-backend yandex-market-frontend 2>$null
-docker rm yandex-market-postgres yandex-market-backend yandex-market-frontend 2>$null
+docker stop online-store-postgres online-store-backend online-store-frontend 2>$null
+docker rm online-store-postgres online-store-backend online-store-frontend 2>$null
 
 Write-Host "Removing old database volume..."
 docker volume rm yandexmarket_postgres_data 2>$null

@@ -1,6 +1,6 @@
 # Docker Setup Guide
 
-This guide explains how to run **Online Store** using Docker. Compose service names may still use the `yandex-market-*` prefix for compatibility with existing volumes and VPS paths.
+This guide explains how to run **Online Store** using Docker. Compose project `online-store`; containers `online-store-*`. Postgres volume `online_store_postgres_data`.
 
 ## Prerequisites
 

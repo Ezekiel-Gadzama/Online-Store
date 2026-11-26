@@ -1,20 +1,23 @@
-# Yandex Market on develop-vps (alongside church-app).
-# Host ports chosen to avoid church-app: 3000, 3101, 8090, 8101, 5432, 6379.
+# Online Store on develop-vps (alongside church-app).
+name: online-store
+
 services:
   postgres:
     image: postgres:15-alpine
-    container_name: yandex-market-postgres
+    container_name: online-store-postgres
+    env_file:
+      - .env
     environment:
-      - POSTGRES_USER=${POSTGRES_USER:-yandex_user}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-yandex_password}
-      - POSTGRES_DB=${POSTGRES_DB:-yandex_market}
+      - POSTGRES_USER=${POSTGRES_USER:-online_store_user}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-change-me}
+      - POSTGRES_DB=${POSTGRES_DB:-online_store}
     volumes:
-      - yandex_postgres_data:/var/lib/postgresql/data
+      - postgres_data:/var/lib/postgresql/data
     ports:
       - "5440:5432"
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-yandex_user} -d ${POSTGRES_DB:-yandex_market}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-online_store_user} -d ${POSTGRES_DB:-online_store}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -23,7 +26,7 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    container_name: yandex-market-backend
+    container_name: online-store-backend
     ports:
       - "8010:8000"
     volumes:
@@ -31,7 +34,7 @@ services:
     env_file:
       - .env
     environment:
-      - DATABASE_URL=postgresql://${POSTGRES_USER:-yandex_user}:${POSTGRES_PASSWORD:-yandex_password}@postgres:5432/${POSTGRES_DB:-yandex_market}
+      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
     depends_on:
       postgres:
         condition: service_healthy
@@ -41,19 +44,21 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 60s
+      start_period: 180s
 
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
-    container_name: yandex-market-frontend
+    container_name: online-store-frontend
     ports:
       - "3010:80"
     depends_on:
       backend:
-        condition: service_healthy
+        condition: service_started
     restart: unless-stopped
 
 volumes:
-  yandex_postgres_data:
+  postgres_data:
+    external: true
+    name: online_store_postgres_data

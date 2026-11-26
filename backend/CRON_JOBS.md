@@ -37,7 +37,7 @@ Edit crontab: `crontab -e`
 */15 * * * * cd /path/to/Yandex\ Market/backend && python -m app.jobs.runner products
 ```
 
-Replace `/path/to/Yandex Market` with your actual project path.
+Replace with your project path (e.g. `C:\Users\ezeki\PycharmProjects\Online Store`).
 
 ## Windows (Task Scheduler)
 
@@ -47,7 +47,7 @@ Replace `/path/to/Yandex Market` with your actual project path.
 4. Action: Start a program
    - Program: `python`
    - Arguments: `-m app.jobs.runner orders`
-   - Start in: `C:\path\to\Yandex Market\backend`
+   - Start in: `C:\path\to\Online Store\backend`
 
 ## Requirements
 

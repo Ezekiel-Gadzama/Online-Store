@@ -34,9 +34,5 @@ Store-aware routes under `/api/stores`, `/api/sync`, `/api/orders`, `/api/produc
 ## Operations docs
 
 - [STORE_SETUP.md](STORE_SETUP.md) — template catalogs  
-- [DOCKER.md](DOCKER.md) — containers (legacy `yandex-market-*` container names on some hosts)  
-- [DEPLOY_VPS.md](DEPLOY_VPS.md) — production VPS layout  
-
-## Historical note
-
-The project was originally branded and documented as a single-business “Yandex Market” manager. The current model is **Online Store** with multi-store + multi-marketplace; Yandex-specific fields and `YandexMarketAPI` refer to the marketplace integration, not the application title.
+- [DOCKER.md](DOCKER.md) — `online-store` compose project  
+- [DEPLOY_VPS.md](DEPLOY_VPS.md) — `/opt/online-store` on VPS  

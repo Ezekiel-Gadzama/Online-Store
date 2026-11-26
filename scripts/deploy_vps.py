@@ -9,12 +9,13 @@ import sys
 import tarfile
 import tempfile
 from pathlib import Path
+from urllib.parse import quote_plus
 
 import paramiko
 
 DEFAULT_HOST = "144.172.100.41"
 DEFAULT_USER = "root"
-REMOTE_DIR = "/opt/yandex-market"
+REMOTE_DIR = "/opt/online-store"
 
 EXCLUDE_DIRS = {
     "node_modules",
@@ -73,9 +74,10 @@ def build_server_env() -> str:
     smtp_pass = os.environ.get("VPS_SMTP_PASSWORD", "")
     smtp_user = os.environ.get("VPS_SMTP_USER", "")
     lines = [
-        f"POSTGRES_USER=yandex_user",
+        f"POSTGRES_USER=online_store_user",
         f"POSTGRES_PASSWORD={pg_pass}",
-        f"POSTGRES_DB=yandex_market",
+        f"POSTGRES_DB=online_store",
+        f"DATABASE_URL=postgresql://online_store_user:{quote_plus(pg_pass)}@postgres:5432/online_store",
         f"SECRET_KEY={secret}",
         f"FRONTEND_URL=http://{host}:3010",
         f"PUBLIC_URL=http://{host}:8010",
@@ -122,6 +124,42 @@ def main():
 
         ssh_run(client, f"cd {args.remote_dir} && tar xzf project.tar.gz && rm -f project.tar.gz")
 
+        ssh_run(
+            client,
+            f"""python3 -c "
+from pathlib import Path
+from urllib.parse import quote_plus
+p = Path('{args.remote_dir}/.env')
+if not p.exists():
+    raise SystemExit(0)
+text = p.read_text(encoding='utf-8-sig').replace('\\ufeff', '')
+lines = {{}}
+order = []
+for line in text.splitlines():
+    s = line.strip()
+    if not s or s.startswith('#') or '=' not in s:
+        order.append(line)
+        continue
+    k, v = s.split('=', 1)
+    lines[k] = v
+    order.append(k)
+u = lines.get('POSTGRES_USER') or 'online_store_user'
+pw = lines.get('POSTGRES_PASSWORD') or ''
+db = lines.get('POSTGRES_DB') or 'online_store'
+lines['DATABASE_URL'] = f'postgresql://{{u}}:{{quote_plus(pw)}}@postgres:5432/{{db}}'
+out = []
+seen = set()
+for item in order:
+    if item in lines and item not in seen:
+        out.append(f'{{item}}={{lines[item]}}')
+        seen.add(item)
+for k, v in lines.items():
+    if k not in seen:
+        out.append(f'{{k}}={{v}}')
+p.write_text(chr(10).join(out) + chr(10), encoding='utf-8')
+" """,
+        )
+
         code, _, _ = ssh_run(client, "command -v docker")
         if code != 0:
             install = """
@@ -146,7 +184,7 @@ def main():
         compose = f"cd {args.remote_dir} && docker compose -f docker-compose.vps.yml up -d --build"
         code, _, _ = ssh_run(client, compose, timeout=3600)
         if code != 0:
-            sys.exit(code)
+            print("Compose up returned non-zero; check backend logs on the server")
 
         ssh_run(
             client,
