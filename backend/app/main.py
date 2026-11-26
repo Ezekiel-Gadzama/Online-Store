@@ -426,9 +426,14 @@ def _parse_yandex_order(yandex_order: dict, db, business_id: int = None, store_i
         creation_date_str = yandex_order.get("creationDate")
         if creation_date_str:
             try:
-                        # Parse format: "08-02-2026 18:00:14" (DD-MM-YYYY HH:MM:SS)
-                        # Use the global datetime import
-                        order_created_at = datetime.strptime(creation_date_str, "%d-%m-%Y %H:%M:%S")
+                if "T" in str(creation_date_str):
+                    order_created_at = datetime.fromisoformat(
+                        str(creation_date_str).replace("Z", "+00:00")
+                    )
+                else:
+                    order_created_at = datetime.strptime(
+                        str(creation_date_str), "%d-%m-%Y %H:%M:%S"
+                    )
             except Exception as e:
                 print(f"  ⚠️  Could not parse creationDate '{creation_date_str}': {str(e)}")
                 order_created_at = None

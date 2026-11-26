@@ -14,6 +14,40 @@ from app.store_scope import products_for_store
 router = APIRouter()
 
 
+def _purchase_links_dict(product: models.Product) -> dict:
+    links = product.marketplace_purchase_links
+    if not isinstance(links, dict):
+        links = {}
+    else:
+        links = {str(k): v for k, v in links.items() if v}
+    yandex = (product.yandex_purchase_link or "").strip()
+    if yandex and not links.get("yandex"):
+        links["yandex"] = yandex
+    return links
+
+
+def _apply_purchase_link_fields(db_product: models.Product, update_data: dict) -> None:
+    if "marketplace_purchase_links" in update_data:
+        raw = update_data["marketplace_purchase_links"] or {}
+        cleaned = {
+            str(k): str(v).strip()
+            for k, v in raw.items()
+            if v is not None and str(v).strip()
+        }
+        db_product.marketplace_purchase_links = cleaned
+        db_product.yandex_purchase_link = cleaned.get("yandex")
+    elif "yandex_purchase_link" in update_data:
+        val = update_data["yandex_purchase_link"]
+        val = val.strip() if isinstance(val, str) and val.strip() else None
+        db_product.yandex_purchase_link = val
+        links = _purchase_links_dict(db_product)
+        if val:
+            links["yandex"] = val
+        else:
+            links.pop("yandex", None)
+        db_product.marketplace_purchase_links = links
+
+
 def _product_for_store(
     db: Session, product_id: int, business_id: int, store_id: int
 ) -> models.Product | None:
@@ -37,6 +71,9 @@ def _convert_product_json_fields(product: models.Product) -> dict:
         "yandex_market_sku": product.yandex_market_sku,
         "email_template_id": product.email_template_id,
         "documentation_id": product.documentation_id,
+        "yandex_purchase_link": product.yandex_purchase_link,
+        "marketplace_purchase_links": _purchase_links_dict(product),
+        "usage_period": product.usage_period,
         "is_active": product.is_active,
         "is_synced": product.is_synced,
         "profit": product.profit,
@@ -371,14 +408,19 @@ def update_product(
         else:
             db_product.yandex_full_data = yandex_field_updates
     
-    # Update only local-only fields (product_type, cost_price, supplier info, email_template_id, documentation_id, yandex_purchase_link, usage_period, is_active)
-    local_only_fields = ['product_type', 'cost_price', 'supplier_url', 'supplier_name', 'email_template_id', 'documentation_id', 'yandex_purchase_link', 'usage_period', 'is_active']
+    # Local-only fields (not pushed as Yandex JSON patches)
+    local_only_fields = [
+        'product_type', 'cost_price', 'supplier_url', 'supplier_name',
+        'email_template_id', 'documentation_id', 'usage_period', 'is_active',
+    ]
     for field in local_only_fields:
         if field in update_data:
             val = update_data[field]
             if field == 'product_type' and val is not None:
                 val = models.ProductType(val) if isinstance(val, str) else val
             setattr(db_product, field, val)
+    if "marketplace_purchase_links" in update_data or "yandex_purchase_link" in update_data:
+        _apply_purchase_link_fields(db_product, update_data)
     
     # If product is synced with Yandex and we have Yandex field updates, push changes
     if is_synced and has_yandex_updates:

@@ -99,5 +99,16 @@ def ensure_database_schema(db: Session) -> None:
         CREATE INDEX IF NOT EXISTS idx_product_cost_history_dates
         ON product_cost_history(product_id, start_date, end_date)
     """))
+    db.execute(text("""
+        ALTER TABLE products
+        ADD COLUMN IF NOT EXISTS marketplace_purchase_links JSONB NOT NULL DEFAULT '{}'::jsonb
+    """))
+    db.execute(text("""
+        UPDATE products
+        SET marketplace_purchase_links = jsonb_build_object('yandex', yandex_purchase_link)
+        WHERE yandex_purchase_link IS NOT NULL
+          AND btrim(yandex_purchase_link) <> ''
+          AND (marketplace_purchase_links IS NULL OR marketplace_purchase_links = '{}'::jsonb)
+    """))
 
     db.commit()

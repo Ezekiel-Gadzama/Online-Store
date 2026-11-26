@@ -7,11 +7,14 @@ from app.database import get_db
 from app import models, schemas
 from app.auth import (
     get_current_active_user, require_admin,
-    create_password_reset_token, get_password_hash, get_business_id
+    create_password_reset_token,
+    get_password_hash,
+    get_business_id,
+    password_reset_valid_until,
 )
 from app.services.email_service import EmailService
 from app.services.config_validator import ConfigurationError, format_config_error_response
-from app.config import settings
+from app.config import get_frontend_url
 from app.staff_roles import (
     apply_permission_locks,
     assert_can_change_permissions,
@@ -257,13 +260,13 @@ def create_staff(
     if not staff_data.password:
         reset_token = create_password_reset_token(db_user.id)
         db_user.password_reset_token = reset_token
-        db_user.password_reset_token_expires = datetime.now(timezone.utc) + timedelta(hours=24)
+        db_user.password_reset_token_expires = password_reset_valid_until()
 
         invitation_email_sent = False
         try:
             business_id = get_business_id(current_user)
             email_service = EmailService(business_id=business_id, db=db)
-            reset_url = f"{settings.FRONTEND_URL}/reset-password?token={reset_token}"
+            reset_url = f"{get_frontend_url()}/reset-password?token={reset_token}"
             email_body = f"""
             You have been invited to join Online Store.
 
@@ -499,14 +502,14 @@ def resend_password_reset(
     
     # Store token in database
     staff.password_reset_token = reset_token
-    staff.password_reset_token_expires = datetime.now(timezone.utc) + timedelta(hours=24)
+    staff.password_reset_token_expires = password_reset_valid_until()
     db.commit()
     
     # Send email with reset link
     try:
         business_id = get_business_id(current_user)
         email_service = EmailService(business_id=business_id, db=db)
-        reset_url = f"{settings.FRONTEND_URL}/reset-password?token={reset_token}"
+        reset_url = f"{get_frontend_url()}/reset-password?token={reset_token}"
         email_body = f"""
         <html>
         <body>

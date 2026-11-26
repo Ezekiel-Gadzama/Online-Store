@@ -261,7 +261,8 @@ def request_password_reset(request: schemas.PasswordResetRequest, db: Session = 
     # Store token in database
     from datetime import datetime, timedelta, timezone
     user.password_reset_token = reset_token
-    user.password_reset_token_expires = datetime.now(timezone.utc) + timedelta(hours=24)
+    from app.auth import password_reset_valid_until
+    user.password_reset_token_expires = password_reset_valid_until()
     db.commit()
     
     # Send email with reset link
@@ -271,7 +272,8 @@ def request_password_reset(request: schemas.PasswordResetRequest, db: Session = 
         
         business_id = get_business_id(user)
         email_service = EmailService(business_id=business_id, db=db)
-        reset_url = f"{settings.FRONTEND_URL}/reset-password?token={reset_token}"
+        from app.config import get_frontend_url
+        reset_url = f"{get_frontend_url()}/reset-password?token={reset_token}"
         email_body = f"""
         <html>
         <body>
@@ -326,8 +328,8 @@ def reset_password(reset_data: schemas.PasswordReset, db: Session = Depends(get_
             detail="Invalid reset token"
         )
     
-    from datetime import datetime, timezone
-    if user.password_reset_token_expires and user.password_reset_token_expires < datetime.now(timezone.utc):
+    from app.auth import password_reset_expires_valid
+    if not password_reset_expires_valid(user.password_reset_token_expires):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Reset token has expired"

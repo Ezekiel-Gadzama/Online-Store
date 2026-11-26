@@ -7,6 +7,7 @@ from urllib.parse import urlparse
 from app.config import settings
 from app import models
 from app.database import SessionLocal
+from app.yandex_campaigns import next_page_token
 
 
 class YandexMarketAPI:
@@ -355,8 +356,8 @@ class YandexMarketAPI:
             offer["categoryId"] = base_data["mapping"]["marketCategoryId"]
         elif "categoryId" in base_data:
             offer["categoryId"] = base_data["categoryId"]
-        elif "category" in base_data:
-            offer["category"] = base_data["category"]
+        elif base_data.get("marketCategoryId"):
+            offer["marketCategoryId"] = base_data["marketCategoryId"]
         
         # Extract params from yandex_full_data
         params = base_data.get("params", {})
@@ -421,75 +422,192 @@ class YandexMarketAPI:
         except httpx.HTTPError as e:
             raise Exception(f"Failed to update product on Yandex Market: {str(e)}")
     
+    def _offers_from_response(self, data: Dict[str, Any]) -> List[Dict]:
+        if "offers" in data:
+            offers = data.get("offers") or []
+        else:
+            result = data.get("result") or {}
+            offers = result.get("offers") or []
+        return offers if isinstance(offers, list) else []
+
+    def _fetch_v1_business_orders(
+        self,
+        body: Dict[str, Any],
+        *,
+        log_first_page: bool = False,
+    ) -> List[Dict]:
+        """POST v1/businesses/{businessId}/orders (replaces deprecated GET campaign orders)."""
+        if not self.business_id:
+            raise ValueError("business_id is required to fetch orders")
+        url = f"{self.base_url}/v1/businesses/{self.business_id}/orders"
+        collected: List[Dict] = []
+        page_token: Optional[str] = None
+        log_raw = log_first_page
+        while True:
+            params: Dict[str, Any] = {"limit": 50}
+            if page_token:
+                params["page_token"] = page_token
+            response = self._make_request(
+                "POST",
+                url,
+                params=params,
+                json=body,
+                headers=self._get_headers(),
+                timeout=30.0,
+            )
+            response.raise_for_status()
+            data = response.json()
+            if log_raw:
+                print("=" * 80)
+                print("📋 RAW YANDEX v1 ORDERS RESPONSE (first page):")
+                print("=" * 80)
+                print(json.dumps(data, indent=2, ensure_ascii=False))
+                print("=" * 80)
+                log_raw = False
+            result = data.get("result") or {}
+            batch = result.get("orders", data.get("orders", []))
+            if isinstance(batch, list):
+                collected.extend(batch)
+            page_token = next_page_token(data)
+            if not page_token:
+                break
+        return collected
+
+    def _query_offer_mapping_entries(self, body: Dict[str, Any]) -> List[Dict]:
+        """POST v2/businesses/{businessId}/offer-mappings (replaces GET offer-mapping-entries)."""
+        if not self.business_id:
+            raise ValueError("business_id is required")
+        url = f"{self.base_url}/v2/businesses/{self.business_id}/offer-mappings"
+        offer_ids = body.get("offerIds")
+        entries: List[Dict] = []
+        page_token: Optional[str] = None
+        while True:
+            params: Dict[str, Any] = {"limit": 100}
+            if page_token:
+                params["page_token"] = page_token
+            response = self._make_request(
+                "POST",
+                url,
+                params=params,
+                json=body,
+                headers=self._get_headers(),
+                timeout=30.0,
+            )
+            response.raise_for_status()
+            data = response.json()
+            result = data.get("result") or {}
+            batch = result.get("offerMappingEntries") or []
+            if isinstance(batch, list):
+                entries.extend(batch)
+            if offer_ids:
+                break
+            page_token = next_page_token(data)
+            if not page_token:
+                break
+        return entries
+
+    def _campaign_offer_rows(self, offer_ids: List[str]) -> List[Dict]:
+        """POST v2/campaigns/{campaignId}/offers with offerIds (not GET offer-mapping-entries)."""
+        if not self.campaign_id:
+            raise ValueError("campaign_id is required")
+        url = f"{self.base_url}/v2/campaigns/{self.campaign_id}/offers"
+        rows: List[Dict] = []
+        for i in range(0, len(offer_ids), 200):
+            batch = offer_ids[i : i + 200]
+            response = self._make_request(
+                "POST",
+                url,
+                params={"limit": len(batch)},
+                json={"offerIds": batch},
+                headers=self._get_headers(),
+                timeout=30.0,
+            )
+            response.raise_for_status()
+            data = response.json()
+            rows.extend(self._offers_from_response(data))
+        return rows
+
     def get_products(self) -> List[Dict]:
         """Get all products from Yandex Market"""
         if self.is_acma_token:
-            # Campaign API: Try POST /v2/campaigns/*/offers.json first (user's test code showed this works)
-            # If that fails, try POST /v2/campaigns/*/offers (without .json)
-            # Based on endpoint list: POST /v2/campaigns/*/offers exists
             urls_to_try = [
-                f"{self.base_url}/v2/campaigns/{self.campaign_id}/offers.json",
-                f"{self.base_url}/v2/campaigns/{self.campaign_id}/offers"
+                f"{self.base_url}/v2/campaigns/{self.campaign_id}/offers",
             ]
-            payload = {
-                "page": 1,
-                "pageSize": 100
-            }
-            
-            last_error = None
+            last_error: Optional[Exception] = None
             for url in urls_to_try:
+                all_offers: List[Dict] = []
+                page_token: Optional[str] = None
                 try:
-                    print(f"🔍 Fetching products from: {url}")
-                    response = self._make_request("POST", url, json=payload, headers=self._get_headers(), timeout=30.0)
-                    response.raise_for_status()
-                    data = response.json()
-                    print(f"✅ Received response from Yandex API")
-                    
-                    # Check response structure
-                    if "offers" in data:
-                        offers = data.get("offers", [])
-                    elif "result" in data and "offers" in data["result"]:
-                        offers = data.get("result", {}).get("offers", [])
-                    else:
-                        # Try direct array
-                        offers = data if isinstance(data, list) else []
-                    
-                    print(f"📦 Found {len(offers)} offers")
-                    # Log raw Yandex API response for debugging
-                    if offers:
+                    while True:
+                        params: Dict[str, Any] = {"limit": 100}
+                        if page_token:
+                            params["page_token"] = page_token
+                        print(f"🔍 Fetching products from: {url}")
+                        response = self._make_request(
+                            "POST",
+                            url,
+                            params=params,
+                            json={},
+                            headers=self._get_headers(),
+                            timeout=30.0,
+                        )
+                        response.raise_for_status()
+                        data = response.json()
+                        batch = self._offers_from_response(data)
+                        all_offers.extend(batch)
+                        page_token = next_page_token(data)
+                        if not page_token:
+                            break
+                    print(f"📦 Found {len(all_offers)} offers")
+                    if all_offers:
                         print("=" * 80)
-                        print(f"RAW YANDEX API RESPONSE (Campaign API - offers.json) - ALL {len(offers)} PRODUCTS:")
+                        print(f"RAW YANDEX API RESPONSE (Campaign API) - ALL {len(all_offers)} PRODUCTS:")
                         print("=" * 80)
-                        import json
-                        print(json.dumps(offers, indent=2, ensure_ascii=False))
+                        print(json.dumps(all_offers, indent=2, ensure_ascii=False))
                         print("=" * 80)
-                    return offers
+                    return all_offers
                 except httpx.HTTPError as e:
                     last_error = e
                     print(f"⚠️  {url} failed, trying next endpoint...")
                     continue
-            
-            # If all attempts failed, raise the last error
             print(f"❌ Error getting products from Campaign API: {str(last_error)}")
-            if hasattr(last_error, 'response') and last_error.response:
+            if isinstance(last_error, httpx.HTTPError) and last_error.response:
                 print(f"Response status: {last_error.response.status_code}")
                 print(f"Response body: {last_error.response.text}")
             raise Exception(f"Failed to get products from Yandex Market: {str(last_error)}")
         else:
-            # Business API uses POST to /offer-mappings (not GET)
             url = f"{self.base_url}/v2/businesses/{self.business_id}/offer-mappings"
+            offer_mappings: List[Dict] = []
+            page_token: Optional[str] = None
             try:
-                response = self._make_request("POST", url, json={}, headers=self._get_headers(), timeout=30.0)
-                response.raise_for_status()
-                data = response.json()
-                # Business API: result.offerMappingEntries
-                offer_mappings = data.get("result", {}).get("offerMappingEntries", [])
-                # Log raw Yandex API response for debugging
+                while True:
+                    params: Dict[str, Any] = {"limit": 100}
+                    if page_token:
+                        params["page_token"] = page_token
+                    response = self._make_request(
+                        "POST",
+                        url,
+                        params=params,
+                        json={},
+                        headers=self._get_headers(),
+                        timeout=30.0,
+                    )
+                    response.raise_for_status()
+                    data = response.json()
+                    result = data.get("result") or {}
+                    batch = result.get("offerMappingEntries") or []
+                    if isinstance(batch, list):
+                        offer_mappings.extend(batch)
+                    page_token = next_page_token(data)
+                    if not page_token:
+                        break
                 if offer_mappings:
                     print("=" * 80)
-                    print(f"RAW YANDEX API RESPONSE (Business API - offer-mappings) - ALL {len(offer_mappings)} PRODUCTS:")
+                    print(
+                        f"RAW YANDEX API RESPONSE (Business API - offer-mappings) - "
+                        f"ALL {len(offer_mappings)} PRODUCTS:"
+                    )
                     print("=" * 80)
-                    import json
                     print(json.dumps(offer_mappings, indent=2, ensure_ascii=False))
                     print("=" * 80)
                 return offer_mappings
@@ -574,100 +692,49 @@ class YandexMarketAPI:
             ]
         }
         """
-        all_orders = []
-        
-        # Campaign API is the primary endpoint for orders (works with both ACMA and OAuth tokens if campaign_id is set)
-        if self.campaign_id:
-            url = f"{self.base_url}/v2/campaigns/{self.campaign_id}/orders"
-            params = {
-                "page": 1,
-                "pageSize": 50,
-            }
-            if status:
-                params["status"] = status
-            
-            try:
-                print(f"🔍 Fetching orders from Campaign API: {url}")
-                response = self._make_request("GET", url, params=params, headers=self._get_headers(), timeout=30.0)
-                response.raise_for_status()
-                data = response.json()
-                
-                # LOG RAW YANDEX API RESPONSE - NO MODIFICATIONS
-                print("=" * 80)
-                print(f"📋 RAW YANDEX CAMPAIGN API ORDERS RESPONSE (UNMODIFIED):")
-                print("=" * 80)
-                print(json.dumps(data, indent=2, ensure_ascii=False))
-                print("=" * 80)
-                
-                orders = data.get("orders", [])
-                print(f"📋 Found {len(orders)} orders from Campaign API")
-                if orders:
-                    print(f"📦 Summary: {len(orders)} orders found")
-                    for order in orders:
-                        print(f"  Order #{order.get('id')}: status={order.get('status')}, "
-                              f"items={len(order.get('items', []))}, "
-                              f"total={order.get('total', order.get('itemsTotal', 0))}, "
-                              f"fake={order.get('fake', False)}")
-                        for item in order.get('items', []):
-                            print(f"    Item #{item.get('id')}: offerId={item.get('offerId')}, "
-                                  f"name={item.get('offerName')}, count={item.get('count')}, "
-                                  f"price={item.get('price')}, digital={item.get('digitalItem', False)}")
-                
-                all_orders.extend(orders)
-            except httpx.HTTPError as e:
-                print(f"⚠️  Campaign API orders failed: {str(e)}")
-                if hasattr(e, 'response') and e.response:
-                    print(f"  Response status: {e.response.status_code}")
-                    print(f"  Response body: {e.response.text}")
-            
-            # Also try to fetch test/fake orders if requested
-            if include_test:
-                try:
-                    test_params = {**params, "fake": "true"}
-                    print(f"🔍 Fetching test orders from Campaign API...")
-                    response = self._make_request("GET", url, params=test_params, headers=self._get_headers(), timeout=30.0)
-                    response.raise_for_status()
-                    data = response.json()
-                    test_orders = data.get("orders", [])
-                    if test_orders:
-                        print(f"🧪 Found {len(test_orders)} test orders")
-                        # Avoid duplicates
-                        existing_ids = {o.get("id") for o in all_orders}
-                        for test_order in test_orders:
-                            if test_order.get("id") not in existing_ids:
-                                all_orders.append(test_order)
-                except Exception as e:
-                    print(f"⚠️  Could not fetch test orders: {str(e)}")
-        
-        elif self.business_id:
-            # POST v1/businesses/{businessId}/orders (replaces deprecated GET v2/businesses/.../orders)
-            url = f"{self.base_url}/v1/businesses/{self.business_id}/orders"
-            payload: Dict[str, Any] = {"limit": 50}
-            if status:
-                payload["statuses"] = [status]
+        all_orders: List[Dict] = []
+        if not self.business_id:
+            print("❌ business_id is required to fetch orders (v1 API)")
+            return all_orders
 
+        body: Dict[str, Any] = {}
+        if self.campaign_id:
             try:
-                print(f"🔍 Fetching orders from Business API: {url}")
-                response = self._make_request("POST", url, json=payload, headers=self._get_headers(), timeout=30.0)
-                response.raise_for_status()
-                data = response.json()
-                
-                print("=" * 80)
-                print("📋 RAW YANDEX BUSINESS API ORDERS RESPONSE (UNMODIFIED):")
-                print("=" * 80)
-                print(json.dumps(data, indent=2, ensure_ascii=False))
-                print("=" * 80)
-                
-                orders = data.get("result", {}).get("orders", data.get("orders", []))
-                print(f"📋 Found {len(orders)} orders from Business API")
-                all_orders.extend(orders)
-            except httpx.HTTPError as e:
-                print(f"❌ Business API orders failed: {str(e)}")
-                if hasattr(e, 'response') and e.response:
-                    print(f"  Response status: {e.response.status_code}")
-                    print(f"  Response body: {e.response.text}")
-        else:
-            print("❌ No campaign_id or business_id configured - cannot fetch orders")
+                body["campaignIds"] = [int(self.campaign_id)]
+            except ValueError:
+                body["campaignIds"] = [self.campaign_id]
+        if status:
+            body["statuses"] = [status]
+
+        try:
+            print("🔍 Fetching orders via POST v1/businesses/.../orders")
+            orders = self._fetch_v1_business_orders(body, log_first_page=True)
+            print(f"📋 Found {len(orders)} orders")
+            for order in orders:
+                print(
+                    f"  Order #{order.get('id')}: status={order.get('status')}, "
+                    f"items={len(order.get('items', []))}, "
+                    f"fake={order.get('fake', False)}"
+                )
+            all_orders.extend(orders)
+        except httpx.HTTPError as e:
+            print(f"⚠️  v1 orders failed: {str(e)}")
+            if hasattr(e, "response") and e.response:
+                print(f"  Response status: {e.response.status_code}")
+                print(f"  Response body: {e.response.text}")
+
+        if include_test:
+            try:
+                test_body = {**body, "fake": True}
+                test_orders = self._fetch_v1_business_orders(test_body)
+                if test_orders:
+                    print(f"🧪 Found {len(test_orders)} test orders")
+                    existing_ids = {o.get("id") for o in all_orders}
+                    for test_order in test_orders:
+                        if test_order.get("id") not in existing_ids:
+                            all_orders.append(test_order)
+            except Exception as e:
+                print(f"⚠️  Could not fetch test orders: {str(e)}")
         
         print(f"📦 Total orders fetched: {len(all_orders)}")
         return all_orders
@@ -678,67 +745,49 @@ class YandexMarketAPI:
         Returns the complete order data including all items.
         This is critical for delivering digital goods - we need ALL items from Yandex.
         """
-        if not self.campaign_id:
-            raise ValueError("campaign_id is required to get order details")
-        
-        url = f"{self.base_url}/v2/campaigns/{self.campaign_id}/orders/{order_id}"
-        
+        if not self.business_id:
+            raise ValueError("business_id is required to get order details")
+
         try:
-            print(f"🔍 Fetching order details from Yandex: {url}")
-            response = self._make_request("GET", url, headers=self._get_headers(), timeout=30.0)
-            response.raise_for_status()
-            data = response.json()
-            
-            # LOG RAW YANDEX API RESPONSE - NO MODIFICATIONS
-            print("=" * 80)
-            print(f"📋 RAW YANDEX API RESPONSE FOR ORDER {order_id} (UNMODIFIED):")
-            print("=" * 80)
-            print(json.dumps(data, indent=2, ensure_ascii=False))
-            print("=" * 80)
-            
-            # Handle different response structures
-            if "order" in data:
-                order_data = data["order"]
-            elif "orders" in data and len(data["orders"]) > 0:
-                order_data = data["orders"][0]
-            else:
-                order_data = data
-            
+            order_id_int = int(str(order_id).strip())
+        except ValueError:
+            raise ValueError(f"Invalid Yandex order id: {order_id}")
+
+        body: Dict[str, Any] = {"orderIds": [order_id_int]}
+        if self.campaign_id:
+            try:
+                body["campaignIds"] = [int(self.campaign_id)]
+            except ValueError:
+                body["campaignIds"] = [self.campaign_id]
+
+        try:
+            print(f"🔍 Fetching order {order_id} via POST v1/businesses/.../orders")
+            orders = self._fetch_v1_business_orders(body, log_first_page=True)
+            if not orders:
+                raise Exception(f"Order {order_id} not found in v1 API response")
+            order_data = orders[0]
             print(f"✅ Retrieved order {order_id} with {len(order_data.get('items', []))} items")
             return order_data
         except httpx.HTTPError as e:
             error_detail = ""
-            if hasattr(e, 'response') and e.response:
+            if hasattr(e, "response") and e.response:
                 error_detail = f" - Status: {e.response.status_code}, Body: {e.response.text}"
             raise Exception(f"Failed to get order {order_id} from Yandex Market{error_detail}")
     
     def accept_order(self, order_id: str) -> Dict:
         """Accept an order on Yandex Market (for digital products)"""
-        if self.is_acma_token:
-            # Campaign API uses /orders/{order_id}/status.json endpoint
-            url = f"{self.base_url}/v2/campaigns/{self.campaign_id}/orders/{order_id}/status.json"
-            payload = {"status": "PROCESSING"}  # Accept order
-        else:
-            url = f"{self.base_url}/v1/businesses/{self.business_id}/orders/{order_id}/accept"
-            payload = None
-        
+        if not self.business_id:
+            raise ValueError("business_id is required to accept orders")
+        url = f"{self.base_url}/v1/businesses/{self.business_id}/orders/{order_id}/accept"
+
         try:
-            with httpx.Client() as client:
-                if payload:
-                    response = client.post(
-                        url,
-                        json=payload,
-                        headers=self._get_headers(),
-                        timeout=30.0
-                    )
-                else:
-                    response = client.post(
-                        url,
-                        headers=self._get_headers(),
-                        timeout=30.0
-                    )
-                response.raise_for_status()
+            response = self._make_request(
+                "POST", url, headers=self._get_headers(), timeout=30.0
+            )
+            response.raise_for_status()
+            if response.text:
                 return response.json()
+            return {"success": True}
         except httpx.HTTPError as e:
             raise Exception(f"Failed to accept order on Yandex Market: {str(e)}")
     
@@ -842,9 +891,8 @@ class YandexMarketAPI:
         # Calculate activate_till date in YYYY-MM-DD format if not provided
         # Yandex Market API requires just the date (YYYY-MM-DD), no time, no timezone
         if not activate_till:
-            from datetime import datetime, timedelta
-            expiry_date = datetime.utcnow() + timedelta(days=30)
-            activate_till = expiry_date.strftime("%Y-%m-%d")
+            from app.activation_dates import yandex_activate_till_date
+            activate_till = yandex_activate_till_date(30)
         
         # Ensure activate_till is a non-empty string
         if not activate_till or not isinstance(activate_till, str) or len(activate_till.strip()) == 0:
@@ -1138,7 +1186,7 @@ class YandexMarketAPI:
         url = f"{self.base_url}/v2/businesses/{self.business_id}/chats"
         params: Dict[str, Any] = {"limit": max(1, min(20, int(limit)))}
         if page_token:
-            params["pageToken"] = page_token
+            params["page_token"] = page_token
 
         try:
             with httpx.Client() as client:
@@ -1170,7 +1218,7 @@ class YandexMarketAPI:
         url = f"{self.base_url}/v2/businesses/{self.business_id}/chats/history"
         params: Dict[str, Any] = {"chatId": int(chat_id), "limit": max(1, min(100, int(limit)))}
         if page_token:
-            params["pageToken"] = page_token
+            params["page_token"] = page_token
 
         try:
             with httpx.Client() as client:
@@ -1512,7 +1560,7 @@ class YandexMarketAPI:
         return images, videos
     
     def list_campaigns(self) -> List[Dict]:
-        """GET v2/campaigns — list stores (limit + pageToken; no page/pageSize/clientId)."""
+        """GET v2/campaigns — list stores (limit + page_token; no page/pageSize)."""
         from app.yandex_campaigns import fetch_campaigns_list
 
         return fetch_campaigns_list(
@@ -1694,31 +1742,23 @@ class YandexMarketAPI:
     
     # Product Visibility Management
     def update_product_availability(self, shop_sku: str, available: bool) -> Dict:
-        """
-        Update product availability/visibility on storefront
-        available: True for ACTIVE, False for INACTIVE
-        """
-        # Business API uses offer-mappings/update for all product updates
-        if self.is_acma_token:
-            # Campaign API: Use POST /v2/campaigns/*/offers/update or POST /v2/campaigns/*/offer-mapping-entries/updates
-            # Based on endpoint list: POST /v2/campaigns/*/offers/update exists
-            url = f"{self.base_url}/v2/campaigns/{self.campaign_id}/offers/update"
+        """Show or hide offer on storefront (hidden-offers; availability on offers/update is deprecated)."""
+        if not self.campaign_id:
+            raise ValueError("campaign_id is required to change offer visibility")
+        if available:
+            url = f"{self.base_url}/v2/campaigns/{self.campaign_id}/hidden-offers/delete"
+            payload = {"hiddenOffers": [{"offerId": shop_sku}]}
         else:
-            url = f"{self.base_url}/v2/businesses/{self.business_id}/offer-mappings/update"
-        
-        payload = {
-            "offerMappings": [{
-                "offer": {
-                    "shopSku": shop_sku,
-                    "availability": "ACTIVE" if available else "INACTIVE"
-                }
-            }]
-        }
-        
+            url = f"{self.base_url}/v2/campaigns/{self.campaign_id}/hidden-offers"
+            payload = {"hiddenOffers": [{"offerId": shop_sku}]}
         try:
-            response = self._make_request("POST", url, json=payload, headers=self._get_headers(), timeout=30.0)
+            response = self._make_request(
+                "POST", url, json=payload, headers=self._get_headers(), timeout=30.0
+            )
             response.raise_for_status()
-            return response.json()
+            if response.text:
+                return response.json()
+            return {"success": True}
         except httpx.HTTPError as e:
             raise Exception(f"Failed to update product availability: {str(e)}")
     
@@ -1780,41 +1820,33 @@ class YandexMarketAPI:
     def get_product_documents(self, shop_sku: str) -> List[Dict]:
         """Get all documents attached to a product"""
         # Note: May need to use offer-mappings with specific SKU filter
-        if self.is_acma_token:
-            url = f"{self.base_url}/v2/campaigns/{self.campaign_id}/offer-mapping-entries"
-        else:
-            url = f"{self.base_url}/v2/businesses/{self.business_id}/offer-mappings"
-        
         try:
-            with httpx.Client() as client:
-                response = client.get(
-                    url,
-                    headers=self._get_headers(),
-                    timeout=30.0
-                )
-                response.raise_for_status()
-                data = response.json()
-                return data.get("result", {}).get("documents", [])
+            entries = self._query_offer_mapping_entries({"offerIds": [shop_sku]})
+            documents: List[Dict] = []
+            for entry in entries:
+                offer = entry.get("offer") if isinstance(entry, dict) else {}
+                if isinstance(offer, dict) and offer.get("documents"):
+                    documents.extend(offer["documents"])
+            return documents
         except httpx.HTTPError as e:
             raise Exception(f"Failed to get product documents: {str(e)}")
     
     def delete_product_document(self, shop_sku: str, document_id: str) -> Dict:
         """Delete a document from a product"""
         # Document deletion may not be available in Business API
-        if self.is_acma_token:
-            url = f"{self.base_url}/v2/campaigns/{self.campaign_id}/offer-mapping-entries"
-        else:
-            url = f"{self.base_url}/v2/businesses/{self.business_id}/offer-mappings"
-        
+        url = f"{self.base_url}/v2/businesses/{self.business_id}/offer-mappings/update"
+        payload = {
+            "offerMappings": [{
+                "offer": {"shopSku": shop_sku},
+                "deleteDocuments": [document_id],
+            }]
+        }
         try:
-            with httpx.Client() as client:
-                response = client.delete(
-                    url,
-                    headers=self._get_headers(),
-                    timeout=30.0
-                )
-                response.raise_for_status()
-                return response.json()
+            response = self._make_request(
+                "POST", url, json=payload, headers=self._get_headers(), timeout=30.0
+            )
+            response.raise_for_status()
+            return response.json()
         except httpx.HTTPError as e:
             raise Exception(f"Failed to delete product document: {str(e)}")
     
@@ -1854,27 +1886,25 @@ class YandexMarketAPI:
         More efficient than creating products one by one
         """
         if self.is_acma_token:
-            url = f"{self.base_url}/v2/campaigns/{self.campaign_id}/offer-mapping-entries"
+            url = f"{self.base_url}/v2/campaigns/{self.campaign_id}/offers/update"
         else:
-            url = f"{self.base_url}/v2/businesses/{self.business_id}/offer-mappings"
-        
-        offers = []
-        for product in products:
-            offer = self._build_offer_payload(product)
-            offers.append(offer)
-        
-        payload = {"offers": offers}
-        
+            url = f"{self.base_url}/v2/businesses/{self.business_id}/offer-mappings/update"
+
+        if self.is_acma_token:
+            payload = {"offers": [self._build_offer_payload(product) for product in products]}
+        else:
+            payload = {
+                "offerMappings": [
+                    {"offer": self._build_offer_payload(product)} for product in products
+                ]
+            }
+
         try:
-            with httpx.Client() as client:
-                response = client.post(
-                    url,
-                    json=payload,
-                    headers=self._get_headers(),
-                    timeout=60.0  # Longer timeout for bulk operations
-                )
-                response.raise_for_status()
-                return response.json()
+            response = self._make_request(
+                "POST", url, json=payload, headers=self._get_headers(), timeout=60.0
+            )
+            response.raise_for_status()
+            return response.json()
         except httpx.HTTPError as e:
             raise Exception(f"Failed to create bulk products: {str(e)}")
     
@@ -1937,8 +1967,8 @@ class YandexMarketAPI:
         # Category information
         if product.yandex_category_id:
             offer["categoryId"] = product.yandex_category_id
-        elif product.yandex_category_path:
-            offer["category"] = product.yandex_category_path
+        elif product.yandex_category_id:
+            offer["marketCategoryId"] = product.yandex_category_id
         
         # Product parameters
         params = {}
@@ -1979,24 +2009,15 @@ class YandexMarketAPI:
     # Get product by SKU with full details
     def get_product_by_sku(self, shop_sku: str) -> Optional[Dict]:
         """Get a specific product by SKU with all details"""
-        if self.is_acma_token:
-            url = f"{self.base_url}/v2/campaigns/{self.campaign_id}/offer-mapping-entries"
-        else:
-            url = f"{self.base_url}/v2/businesses/{self.business_id}/offer-mappings"
-        params = {"shopSku": shop_sku}
-        
         try:
-            with httpx.Client() as client:
-                response = client.get(
-                    url,
-                    params=params,
-                    headers=self._get_headers(),
-                    timeout=30.0
-                )
-                response.raise_for_status()
-                data = response.json()
-                entries = data.get("result", {}).get("offerMappingEntries", [])
+            if self.business_id:
+                entries = self._query_offer_mapping_entries({"offerIds": [shop_sku]})
                 return entries[0] if entries else None
+            if self.campaign_id:
+                offers = self._campaign_offer_rows([shop_sku])
+                if offers:
+                    return {"offer": offers[0]}
+            return None
         except httpx.HTTPError as e:
             raise Exception(f"Failed to get product by SKU: {str(e)}")
     
@@ -2014,15 +2035,15 @@ class YandexMarketAPI:
         else:
             url = f"{self.base_url}/v2/businesses/{self.business_id}/offer-mappings/update"
         
-        payload = {
-            "offerMappings": [{
-                "offer": {
-                    "shopSku": shop_sku,
-                    "params": specifications
-                }
-            }]
-        }
-        
+        if self.is_acma_token:
+            payload = {"offers": [{"shopSku": shop_sku, "params": specifications}]}
+        else:
+            payload = {
+                "offerMappings": [{
+                    "offer": {"shopSku": shop_sku, "params": specifications},
+                }]
+            }
+
         try:
             response = self._make_request("POST", url, json=payload, headers=self._get_headers(), timeout=30.0)
             response.raise_for_status()

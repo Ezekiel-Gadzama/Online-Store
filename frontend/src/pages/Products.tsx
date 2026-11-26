@@ -4,6 +4,11 @@ import { productsApi, Product, ProductUpdate, ProductCostHistoryCreate } from '.
 import { activationTemplatesApi } from '../api/activationTemplates'
 import { documentationsApi } from '../api/documentations'
 import { reviewsApi } from '../api/reviews'
+import {
+  marketplaceConnectionsApi,
+  MARKETPLACE_OPTIONS,
+  type MarketplaceId,
+} from '../api/marketplaceConnections'
 import { mediaApi } from '../api/media'
 import { useAuth } from '../contexts/AuthContext'
 import { Eye, X, Star, CheckCircle, AlertCircle, RefreshCw } from 'lucide-react'
@@ -58,14 +63,21 @@ export default function Products() {
 
   const updateProductMutation = useMutation({
     mutationFn: ({ id, data }: { id: number; data: ProductUpdate }) => productsApi.update(id, data),
-    onSuccess: (updatedProduct) => {
+    onSuccess: (updatedProduct, variables) => {
       queryClient.invalidateQueries({ queryKey: ['products'] })
       queryClient.invalidateQueries({ queryKey: ['product-full', viewingProduct?.id] })
-      // Update viewingProduct state with the updated product data
       if (viewingProduct && viewingProduct.id === updatedProduct.id) {
         setViewingProduct(updatedProduct)
       }
-      showNotification('success', 'Product updated successfully on Yandex Market!')
+      const yandexPatch = variables.data.yandex_field_updates
+      const syncedMarketplace =
+        yandexPatch && Object.keys(yandexPatch).length > 0
+      showNotification(
+        'success',
+        syncedMarketplace
+          ? 'Product saved and synced to the connected marketplace.'
+          : 'Product saved.'
+      )
     },
     onError: (error: any) => {
       showNotification('error', 'Failed to update product: ' + (error?.response?.data?.detail || error.message))
@@ -379,6 +391,92 @@ export default function Products() {
   )
 }
 
+function marketplaceLabel(id: MarketplaceId, connectionLabel?: string | null) {
+  if (connectionLabel?.trim()) {
+    return connectionLabel.trim()
+  }
+  return MARKETPLACE_OPTIONS.find((o) => o.id === id)?.label || id
+}
+
+function MarketplacePurchaseLinksSection({
+  product,
+  onUpdate,
+}: {
+  product: Product
+  onUpdate: (data: ProductUpdate) => void
+}) {
+  const { data: connections = [], isLoading } = useQuery({
+    queryKey: ['marketplace-connections'],
+    queryFn: () => marketplaceConnectionsApi.list(),
+  })
+
+  const rows = connections
+    .filter((c) => c.is_enabled)
+    .reduce(
+      (acc, c) => {
+        if (!acc.some((r) => r.marketplace === c.marketplace)) {
+          acc.push({ marketplace: c.marketplace, label: c.label })
+        }
+        return acc
+      },
+      [] as { marketplace: MarketplaceId; label: string | null }[]
+    )
+
+  const mergedLinks: Record<string, string> = {
+    ...(product.marketplace_purchase_links || {}),
+  }
+  if (product.yandex_purchase_link && !mergedLinks.yandex) {
+    mergedLinks.yandex = product.yandex_purchase_link
+  }
+
+  const saveLink = (marketplace: string, value: string) => {
+    const next = { ...mergedLinks }
+    const trimmed = value.trim()
+    if (trimmed) {
+      next[marketplace] = trimmed
+    } else {
+      delete next[marketplace]
+    }
+    onUpdate({ marketplace_purchase_links: next })
+  }
+
+  return (
+    <div className="col-span-2">
+      <label className="block text-sm font-medium text-gray-700 mb-2">
+        Marketplace purchase links (optional)
+      </label>
+      {isLoading ? (
+        <p className="text-xs text-gray-500">Loading marketplaces…</p>
+      ) : rows.length === 0 ? (
+        <p className="text-xs text-gray-500">
+          Add enabled marketplace connections under Settings to set purchase links here.
+        </p>
+      ) : (
+        <div className="space-y-3">
+          {rows.map((row) => (
+            <div key={row.marketplace}>
+              <label className="block text-xs font-medium text-gray-600 mb-1">
+                {marketplaceLabel(row.marketplace, row.label)}
+              </label>
+              <input
+                type="url"
+                key={`${product.id}-${row.marketplace}-${mergedLinks[row.marketplace] || ''}`}
+                defaultValue={mergedLinks[row.marketplace] || ''}
+                onBlur={(e) => saveLink(row.marketplace, e.target.value)}
+                placeholder="https://…"
+                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+            </div>
+          ))}
+        </div>
+      )}
+      <p className="mt-2 text-xs text-gray-500">
+        One link per configured marketplace (used in marketing emails and staff workflows).
+      </p>
+    </div>
+  )
+}
+
 // Product View Modal Component
 function ProductViewModal({
   product,
@@ -545,21 +643,10 @@ function ProductViewModal({
                     }}
                   />
                 </div>
-                <div className="col-span-2">
-                  <label className="block text-sm font-medium text-gray-700 mb-2">Yandex Purchase Link (Optional)</label>
-                  <input
-                    type="url"
-                    defaultValue={product.yandex_purchase_link || ''}
-                    onChange={(e) => {
-                      onUpdateProduct(product.id, { yandex_purchase_link: e.target.value || null })
-                    }}
-                    placeholder="https://market.yandex.ru/..."
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  />
-                  <p className="mt-1 text-xs text-gray-500">
-                    Link to purchase this product on Yandex Market
-                  </p>
-                </div>
+                <MarketplacePurchaseLinksSection
+                  product={product}
+                  onUpdate={(data) => onUpdateProduct(product.id, data)}
+                />
                 {product.product_type === 'physical' && (
                   <div className="col-span-2">
                     <label className="block text-sm font-medium text-gray-700 mb-2">Usage Period (Days) (Optional)</label>

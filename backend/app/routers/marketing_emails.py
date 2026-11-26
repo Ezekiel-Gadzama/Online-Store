@@ -335,7 +335,16 @@ async def broadcast_marketing_email(
             # Check each product the client has purchased
             for product in client.purchased_products:
                 # Skip if product doesn't have Yandex purchase link, is inactive, or doesn't exist
-                if not product.yandex_purchase_link or not product.is_active:
+                purchase_link = None
+                links = product.marketplace_purchase_links
+                if isinstance(links, dict):
+                    for v in links.values():
+                        if v:
+                            purchase_link = v
+                            break
+                if not purchase_link:
+                    purchase_link = product.yandex_purchase_link
+                if not purchase_link or not product.is_active:
                     continue
                 
                 # Get purchase history for this product
@@ -415,9 +424,18 @@ async def broadcast_marketing_email(
             expired_product_list = []
             for ep in expired_products:
                 product = ep["product"]
+                link = None
+                plinks = product.marketplace_purchase_links
+                if isinstance(plinks, dict):
+                    for v in plinks.values():
+                        if v:
+                            link = v
+                            break
+                if not link:
+                    link = product.yandex_purchase_link
                 expired_product_list.append({
                     "name": product.name,
-                    "purchase_link": product.yandex_purchase_link,
+                    "purchase_link": link,
                     "expired_date": ep["expiry_date"].strftime("%B %d, %Y") if ep.get("expiry_date") else "N/A"
                 })
             

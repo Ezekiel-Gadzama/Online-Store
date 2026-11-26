@@ -25,6 +25,9 @@ class ProductBase(BaseModel):
     yandex_market_sku: Optional[str] = None
     email_template_id: Optional[int] = None
     documentation_id: Optional[int] = None
+    yandex_purchase_link: Optional[str] = None
+    marketplace_purchase_links: Dict[str, str] = Field(default_factory=dict)
+    usage_period: Optional[int] = None
     is_active: bool = True
     # All Yandex fields are stored in yandex_full_data JSON, not as individual fields
 
@@ -39,6 +42,7 @@ class ProductUpdate(BaseModel):
     email_template_id: Optional[int] = None
     documentation_id: Optional[int] = None
     yandex_purchase_link: Optional[str] = None
+    marketplace_purchase_links: Optional[Dict[str, str]] = None
     usage_period: Optional[int] = Field(None, ge=1, description="Usage period in days for physical products")
     is_active: Optional[bool] = None
     

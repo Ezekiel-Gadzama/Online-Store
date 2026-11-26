@@ -28,3 +28,16 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+def get_frontend_url() -> str:
+    """Public admin UI base URL for links in email (staff invite, password reset)."""
+    raw = (settings.FRONTEND_URL or "").strip().rstrip("/")
+    if raw and "localhost" not in raw and "127.0.0.1" not in raw:
+        return raw
+    pub = (settings.PUBLIC_URL or "").strip().rstrip("/")
+    if pub and "localhost" not in pub and "127.0.0.1" not in pub:
+        if pub.endswith(":8010"):
+            return f"{pub[:-5]}:3010"
+        return pub
+    return raw or "http://localhost:3000"

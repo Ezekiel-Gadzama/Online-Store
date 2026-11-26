@@ -1,4 +1,4 @@
-"""GET v2/campaigns — token pagination (limit + pageToken only; not page/pageSize/clientId)."""
+"""Yandex Partner API token pagination (limit + page_token; not page/pageSize)."""
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -17,13 +17,24 @@ def _campaigns_headers(api_token: str, business_id: Optional[str]) -> Dict[str, 
     return headers
 
 
-def _next_page_token(data: Dict[str, Any]) -> Optional[str]:
-    paging = data.get("paging") or {}
-    token = paging.get("nextPageToken")
-    if token:
-        return token
-    pager = data.get("pager") or {}
-    return pager.get("nextPageToken") or None
+def next_page_token(data: Dict[str, Any]) -> Optional[str]:
+    """nextPageToken from top-level or result.paging / pager (post–2026-10 API)."""
+    if not isinstance(data, dict):
+        return None
+    containers = [data]
+    result = data.get("result")
+    if isinstance(result, dict):
+        containers.append(result)
+    for container in containers:
+        paging = container.get("paging") or {}
+        token = paging.get("nextPageToken")
+        if token:
+            return str(token)
+        pager = container.get("pager") or {}
+        token = pager.get("nextPageToken")
+        if token:
+            return str(token)
+    return None
 
 
 def fetch_campaigns_list(
@@ -45,12 +56,12 @@ def fetch_campaigns_list(
         while True:
             params: Dict[str, Any] = {"limit": cap}
             if page_token:
-                params["pageToken"] = page_token
+                params["page_token"] = page_token
             response = client.get(url, headers=headers, params=params, timeout=timeout)
             response.raise_for_status()
             data = response.json()
             campaigns.extend(data.get("campaigns", []))
-            page_token = _next_page_token(data)
+            page_token = next_page_token(data)
             if not page_token:
                 break
     return campaigns

@@ -91,8 +91,10 @@ class Product(Base):
     # Documentation for order fulfillment
     documentation_id = Column(Integer, ForeignKey("documentations.id"), nullable=True)
     
-    # Yandex purchase link (optional)
-    yandex_purchase_link = Column(String, nullable=True)  # Link to purchase product on Yandex Market
+    # Purchase links per marketplace key (yandex, ozon, …)
+    marketplace_purchase_links = Column(JSONB, default=dict, server_default="{}")
+    # Legacy mirror of marketplace_purchase_links["yandex"] for older clients
+    yandex_purchase_link = Column(String, nullable=True)
     
     # Usage period for physical products (optional, in days)
     # Used instead of activation template expiry period for physical products

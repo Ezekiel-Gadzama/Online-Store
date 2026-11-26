@@ -3,7 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { clientsApi, ClientCreate, ClientUpdate } from '../api/clients'
 import { productsApi } from '../api/products'
 import { useAuth } from '../contexts/AuthContext'
-import { UserPlus, Edit2, Trash2, X } from 'lucide-react'
+import { UserPlus, Edit2, Trash2, X, Search } from 'lucide-react'
 import ConfirmationModal from '../components/ConfirmationModal'
 
 export default function Clients() {
@@ -14,6 +14,8 @@ export default function Clients() {
   const [selectedClient, setSelectedClient] = useState<any>(null)
   const [selectedProducts, setSelectedProducts] = useState<number[]>([])
   const [filterProductId, setFilterProductId] = useState<number | undefined>(undefined)
+  const [filterProductDraft, setFilterProductDraft] = useState<number | ''>('')
+  const [filterProductSearch, setFilterProductSearch] = useState('')
   const [searchTerm, setSearchTerm] = useState('')
   const [productSearchTerm, setProductSearchTerm] = useState('')
   const [startDate, setStartDate] = useState<string>('')
@@ -51,8 +53,27 @@ export default function Clients() {
 
   const { data: products = [] } = useQuery({
     queryKey: ['products'],
-    queryFn: () => productsApi.getAll(),
+    queryFn: () => productsApi.getAll({ skip: 0, limit: 2000 }),
   })
+
+  const productsMatchingFilterSearch = products.filter((product) => {
+    if (!filterProductSearch.trim()) return true
+    const q = filterProductSearch.toLowerCase()
+    return (
+      product.name.toLowerCase().includes(q) ||
+      product.id.toString().includes(q)
+    )
+  })
+
+  const applyProductFilter = () => {
+    setFilterProductId(filterProductDraft === '' ? undefined : filterProductDraft)
+  }
+
+  const clearProductFilter = () => {
+    setFilterProductDraft('')
+    setFilterProductSearch('')
+    setFilterProductId(undefined)
+  }
 
   const createMutation = useMutation({
     mutationFn: (data: ClientCreate) => clientsApi.create(data),
@@ -184,23 +205,70 @@ export default function Clients() {
               className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
             />
           </div>
-          <div className="w-full sm:w-64">
-            <label htmlFor="product-filter" className="block text-sm font-medium text-gray-700 mb-1">
+          <div className="w-full sm:flex-1 sm:max-w-xl">
+            <label htmlFor="product-filter-search" className="block text-sm font-medium text-gray-700 mb-1">
               Filter by Product
             </label>
+            <div className="flex gap-2 mb-2">
+              <input
+                id="product-filter-search"
+                type="text"
+                placeholder="Search by product name or ID…"
+                value={filterProductSearch}
+                onChange={(e) => setFilterProductSearch(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault()
+                    applyProductFilter()
+                  }
+                }}
+                className="flex-1 min-w-0 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+              <button
+                type="button"
+                onClick={applyProductFilter}
+                className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-blue-600 hover:bg-blue-700 shrink-0"
+              >
+                <Search className="h-4 w-4 sm:mr-2" />
+                <span className="hidden sm:inline">Search</span>
+              </button>
+              {filterProductId !== undefined && (
+                <button
+                  type="button"
+                  onClick={clearProductFilter}
+                  className="px-3 py-2 border border-gray-300 rounded-md text-sm text-gray-700 hover:bg-gray-50 shrink-0"
+                  title="Clear product filter"
+                >
+                  Clear
+                </button>
+              )}
+            </div>
             <select
               id="product-filter"
-              value={filterProductId || ''}
-              onChange={(e) => setFilterProductId(e.target.value ? parseInt(e.target.value) : undefined)}
+              value={filterProductDraft}
+              onChange={(e) =>
+                setFilterProductDraft(e.target.value ? parseInt(e.target.value, 10) : '')
+              }
               className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
             >
               <option value="">All Clients</option>
-              {products.map((product) => (
+              {productsMatchingFilterSearch.map((product) => (
                 <option key={product.id} value={product.id}>
                   {product.name}
                 </option>
               ))}
             </select>
+            {filterProductSearch && productsMatchingFilterSearch.length === 0 && (
+              <p className="mt-1 text-xs text-amber-600">No products match this search.</p>
+            )}
+            {filterProductId !== undefined && (
+              <p className="mt-1 text-xs text-gray-500">
+                Showing clients who purchased:{' '}
+                <span className="font-medium">
+                  {products.find((p) => p.id === filterProductId)?.name || `ID ${filterProductId}`}
+                </span>
+              </p>
+            )}
           </div>
         </div>
         <div className="flex flex-col sm:flex-row gap-4">

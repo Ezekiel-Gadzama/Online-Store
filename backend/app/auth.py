@@ -71,12 +71,26 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None, *
     return encoded_jwt
 
 
+PASSWORD_RESET_TOKEN_HOURS = 24
+
+
+def password_reset_valid_until() -> datetime:
+    return datetime.now(timezone.utc) + timedelta(hours=PASSWORD_RESET_TOKEN_HOURS)
+
+
+def password_reset_expires_valid(expires_at: Optional[datetime]) -> bool:
+    if expires_at is None:
+        return True
+    now = datetime.now(timezone.utc)
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    return expires_at >= now
+
+
 def create_password_reset_token(user_id: int) -> str:
     """Create a password reset token. Uses user_id for unambiguous lookup (supports multi-business staff)."""
-    delta = timedelta(hours=24)
-    now = datetime.now(timezone.utc)
-    expires = now + delta
-    exp = expires.timestamp()
+    expires = password_reset_valid_until()
+    exp = int(expires.timestamp())
     encoded_jwt = jwt.encode(
         {"sub": str(user_id), "exp": exp, "type": "password_reset"},
         settings.SECRET_KEY,

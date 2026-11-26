@@ -561,8 +561,8 @@ class OrderService:
                 if email_template and email_template.activate_till_days:
                     activate_till_days = email_template.activate_till_days
             
-            expiry_date = datetime.utcnow() + timedelta(days=activate_till_days)
-            activate_till = expiry_date.strftime("%Y-%m-%d")
+            from app.activation_dates import yandex_activate_till_date
+            activate_till = yandex_activate_till_date(activate_till_days)
             
             # Add to delivery items
             # Use activation_code_to_use (manual key if provided, otherwise generated key)
@@ -770,10 +770,8 @@ class OrderService:
                 if email_template and email_template.activate_till_days:
                     activate_till_days = email_template.activate_till_days
             
-            # Calculate activate_till date in YYYY-MM-DD format (date only, no time)
-            # Yandex Market API requires just the date (YYYY-MM-DD), not datetime
-            expiry_date = datetime.utcnow() + timedelta(days=activate_till_days)
-            activate_till = expiry_date.strftime("%Y-%m-%d")
+            from app.activation_dates import yandex_activate_till_date
+            activate_till = yandex_activate_till_date(activate_till_days)
             print(f"📅 Activation code expires on: {activate_till} (in {activate_till_days} days, YYYY-MM-DD format)")
             
             # Send activation code and instructions to Yandex Market
