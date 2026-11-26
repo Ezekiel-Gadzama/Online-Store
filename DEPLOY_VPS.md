@@ -22,6 +22,17 @@ docker compose -f docker-compose.vps.yml ps
 docker compose -f docker-compose.vps.yml logs -f backend
 ```
 
+If the backend fails with `password authentication failed for user "yandex_user"`, the Postgres volume kept the old role name while `.env` was updated — run once (from the server):
+
+```bash
+cd /opt/online-store
+set -a && source .env && set +a
+docker compose -f docker-compose.vps.yml exec -T postgres \
+  psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+  -c "ALTER USER \"$POSTGRES_USER\" WITH PASSWORD '$POSTGRES_PASSWORD';"
+docker compose -f docker-compose.vps.yml restart backend
+```
+
 Public URLs (default develop-vps): frontend `:3010`, API `:8010`.
 
 ## Yandex API
